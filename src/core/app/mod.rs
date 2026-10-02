@@ -302,6 +302,9 @@ pub struct App {
   /// The Qobuz sidebar rows (favorites, playlists, albums) shown by the Qobuz
   /// browser. Populated by `GetQobuzPlaylists` dispatch.
   qobuz_playlists: Vec<PlaylistInfo>,
+  /// The Tidal sidebar rows (favorites, playlists, albums) shown by the Tidal
+  /// browser. Populated by `GetTidalPlaylists` dispatch.
+  tidal_playlists: Vec<PlaylistInfo>,
   /// The user's configured internet-radio stations (as playable rows, uri
   /// `radio:<url>`) shown by the sidebar when the Radio source is active.
   /// Populated by `GetRadioStations` dispatch.

@@ -79,6 +79,10 @@ impl App {
     &mut self.qobuz_playlists
   }
 
+  pub(crate) fn tidal_playlists(&self) -> &Vec<PlaylistInfo> {
+    &self.tidal_playlists
+  }
+
   pub(crate) fn radio_stations(&self) -> &Vec<TrackInfo> {
     &self.radio_stations
   }
@@ -476,7 +480,8 @@ impl App {
         .filter(|playlist| playlist.uri.starts_with("qobuz:playlist:"))?,
       Source::Subsonic => self.subsonic_playlists.get(index)?,
       Source::YouTube => self.youtube_playlists.get(index)?,
-      Source::Local | Source::Radio => return None,
+      // Tidal playlists cannot be synced yet.
+      Source::Local | Source::Radio | Source::Tidal => return None,
     };
     Some(crate::core::playlist_sync::Endpoint {
       source: self.active_source,

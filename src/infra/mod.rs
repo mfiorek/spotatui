@@ -33,5 +33,7 @@ pub mod redirect_uri;
 pub mod scripting;
 #[cfg(feature = "subsonic")]
 pub mod subsonic;
+#[cfg(feature = "tidal")]
+pub mod tidal;
 #[cfg(feature = "youtube")]
 pub mod youtube;

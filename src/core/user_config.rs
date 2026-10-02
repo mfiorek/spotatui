@@ -3552,7 +3552,7 @@ radio_stations:
     use crate::core::source::Source;
 
     // Unknown/garbage strings must not panic and fall back to Spotify
-    assert_eq!(Source::from_config_str("Tidal"), Source::Spotify);
+    assert_eq!(Source::from_config_str("Deezer"), Source::Spotify);
     assert_eq!(Source::from_config_str(""), Source::Spotify);
     assert_eq!(Source::from_config_str("local"), Source::Spotify); // case-sensitive
   }

@@ -56,6 +56,7 @@ const playlists: SourcePlaylists = {
   ],
   subsonic: [],
   qobuz: [],
+  tidal: [],
   youtube: [],
   radio: [],
 };

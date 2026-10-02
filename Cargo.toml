@@ -202,7 +202,7 @@ queue-download = ["audio-decode-queue", "dep:tempfile"]
 # the release binaries enable these explicitly (see .github/workflows/cd.yml) and
 # adding them to `default` would pull lofty/symphonia/md-5/stream-download into
 # every plain `cargo build`.
-all-sources = ["local-files", "subsonic", "internet-radio", "youtube", "qobuz"]
+all-sources = ["local-files", "subsonic", "internet-radio", "youtube", "qobuz", "tidal"]
 local-files = ["audio-decode-queue", "queue", "dep:lofty", "dep:symphonia"]
 subsonic = ["dep:md-5", "audio-decode-queue", "queue", "queue-download", "dep:tempfile", "reqwest/stream"]
 internet-radio = ["audio-decode", "dep:stream-download", "dep:icy-metadata"]
@@ -214,6 +214,8 @@ youtube = ["audio-decode-queue", "queue", "queue-download"]
 # Qobuz through its encrypted CMAF stream: each track is decrypted and rebuilt
 # as a FLAC tempfile while it plays through the shared LocalPlayer.
 qobuz = ["audio-decode-queue", "queue", "queue-download", "reqwest/stream", "dep:stream-download", "dep:bytes", "dep:md-5", "dep:sha2", "dep:hex", "dep:base64", "dep:regex", "dep:aes", "dep:cbc", "dep:ctr", "dep:hkdf"]
+# Tidal through the private client API (device-flow login).
+tidal = []
 
 # --- AI DJ / MCP -------------------------------------------------------------
 # Shared tool layer behind both front doors: the taste brief built from the local

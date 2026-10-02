@@ -33,6 +33,7 @@ const empty: SourcePlaylists = {
   local: [],
   subsonic: [],
   qobuz: [],
+  tidal: [],
   youtube: [],
   radio: [],
 };

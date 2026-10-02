@@ -97,6 +97,8 @@ impl App {
         crate::core::source::Source::Qobuz => {
           self.dispatch(IoEvent::GetQobuzSearchResults(query));
         }
+        // Tidal does not search yet (`supports_search` is off).
+        crate::core::source::Source::Tidal => {}
         // Spotify and Local both land on the Web API search, exactly like
         // the search input's if-chain (which has no Local branch).
         crate::core::source::Source::Spotify | crate::core::source::Source::Local => {

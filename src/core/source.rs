@@ -50,17 +50,19 @@ pub enum Source {
   Radio,
   YouTube,
   Qobuz,
+  Tidal,
 }
 
 impl Source {
   /// Every selectable source, in display order. Add new sources here.
-  pub const ALL: [Source; 6] = [
+  pub const ALL: [Source; 7] = [
     Source::Spotify,
     Source::Local,
     Source::Subsonic,
     Source::Radio,
     Source::YouTube,
     Source::Qobuz,
+    Source::Tidal,
   ];
 
   /// Human-readable label shown in the source picker.
@@ -72,6 +74,7 @@ impl Source {
       Source::Radio => "Internet Radio",
       Source::YouTube => "YouTube",
       Source::Qobuz => "Qobuz",
+      Source::Tidal => "Tidal",
     }
   }
 
@@ -84,6 +87,7 @@ impl Source {
       Source::Radio => "free",
       Source::Local => "free",
       Source::Qobuz => "paid subscription, logs in through the browser",
+      Source::Tidal => "paid subscription, logs in with a link.tidal.com code",
     }
   }
 
@@ -98,6 +102,7 @@ impl Source {
       Source::Radio => "Radio",
       Source::YouTube => "YouTube",
       Source::Qobuz => "Qobuz",
+      Source::Tidal => "Tidal",
     }
   }
 
@@ -111,6 +116,7 @@ impl Source {
       "Radio" => Source::Radio,
       "YouTube" => Source::YouTube,
       "Qobuz" => Source::Qobuz,
+      "Tidal" => Source::Tidal,
       _ => Source::Spotify,
     }
   }
@@ -219,6 +225,15 @@ mod tests {
     assert!(!Source::Qobuz.supports_library());
     assert!(!Source::Qobuz.supports_playlist_write());
     assert!(!Source::Qobuz.supports_like());
+  }
+
+  #[test]
+  fn tidal_supports_no_capability_yet() {
+    // The source is a skeleton: no browsing or search is wired up yet.
+    assert!(!Source::Tidal.supports_search());
+    assert!(!Source::Tidal.supports_library());
+    assert!(!Source::Tidal.supports_playlist_write());
+    assert!(!Source::Tidal.supports_like());
   }
 
   #[test]

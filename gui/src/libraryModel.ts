@@ -19,6 +19,7 @@ const PLAYLIST_KEYS: Record<
   Local: "local",
   Subsonic: "subsonic",
   Qobuz: "qobuz",
+  Tidal: "tidal",
   YouTube: "youtube",
 };
 

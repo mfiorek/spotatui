@@ -400,6 +400,7 @@ reads a file in that directory. Other agents must open it.
 | Decoded repeat/shuffle | `src/infra/queue/AGENTS.md` |
 | Radio tune-in | `src/infra/radio/AGENTS.md` |
 | Qobuz streaming | `src/infra/qobuz/AGENTS.md` |
+| Tidal streaming | `src/infra/tidal/AGENTS.md` |
 
 ### Alternative sources (Local / Subsonic / Radio / YouTube / Qobuz)
 

@@ -28,6 +28,7 @@ impl Default for App {
       local_playlists: Vec::new(),
       subsonic_playlists: Vec::new(),
       qobuz_playlists: Vec::new(),
+      tidal_playlists: Vec::new(),
       radio_stations: Vec::new(),
       youtube_playlists: Vec::new(),
       youtube_open_playlist: None,

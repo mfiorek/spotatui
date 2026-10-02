@@ -209,6 +209,7 @@ pub(crate) struct SourcePlaylists {
   local: Vec<PlaylistInfo>,
   subsonic: Vec<PlaylistInfo>,
   qobuz: Vec<PlaylistInfo>,
+  tidal: Vec<PlaylistInfo>,
   youtube: Vec<PlaylistInfo>,
   /// Stations are playable rows (`radio:<url>`), not playlists.
   radio: Vec<TrackInfo>,
@@ -769,6 +770,7 @@ fn playlists(app: &App) -> SourcePlaylists {
     local: app.local_playlists().clone(),
     subsonic: app.subsonic_playlists().clone(),
     qobuz: app.qobuz_playlists().clone(),
+    tidal: app.tidal_playlists().clone(),
     youtube: app.youtube_playlists().clone(),
     radio: app.radio_stations().clone(),
   }

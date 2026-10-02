@@ -127,6 +127,7 @@ pub(super) fn compiled_features() -> Vec<&'static str> {
   push_if_enabled!("internet-radio");
   push_if_enabled!("youtube");
   push_if_enabled!("qobuz");
+  push_if_enabled!("tidal");
   features
 }
 

@@ -83,7 +83,7 @@ impl App {
       .filter(|source| match source {
         Source::Spotify => self.spotify_connected,
         Source::Subsonic => subsonic_configured,
-        Source::Qobuz | Source::YouTube | Source::Local | Source::Radio => true,
+        Source::Qobuz | Source::Tidal | Source::YouTube | Source::Local | Source::Radio => true,
       })
       .collect()
   }
