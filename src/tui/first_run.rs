@@ -5,6 +5,7 @@
 //! is presented with: a crossterm checkbox picker on a real terminal, a
 //! numbered single-select prompt when stdin is piped.
 
+use crate::core::onboarding::QuitDuringOnboarding;
 use crate::core::source::Source;
 use anyhow::{anyhow, Result};
 use crossterm::{
@@ -19,7 +20,7 @@ use std::io::{stdin, stdout, IsTerminal, Write};
 /// Console source picker. Interactive terminals get the checkbox picker; piped
 /// / non-interactive stdin falls back to the numbered single-select prompt so
 /// headless and scripted runs never hang on a raw-mode read. `None` means the
-/// user cancelled or confirmed with nothing selected.
+/// user skipped; Ctrl-C is a [`QuitDuringOnboarding`] error.
 pub fn pick_sources(options: &[Source]) -> Result<Option<Vec<Source>>> {
   if stdout().is_terminal() && stdin().is_terminal() {
     interactive_multiselect(options)
@@ -29,8 +30,9 @@ pub fn pick_sources(options: &[Source]) -> Result<Option<Vec<Source>>> {
 }
 
 /// Interactive checkbox picker: arrow keys / j,k to move, space to toggle, enter
-/// to confirm, esc to skip. Returns the checked sources in display order, or
-/// `None` when the user cancels or confirms with nothing selected.
+/// to confirm, esc or q to skip, Ctrl-C to quit. Returns the checked sources in
+/// display order, `None` when the user skips or confirms with nothing checked,
+/// or a [`QuitDuringOnboarding`] error on Ctrl-C.
 ///
 /// Restores the terminal via a [`RawModeGuard`] on every exit path (early return,
 /// `?`, or panic) so a mid-selection error never leaves the terminal in raw mode.
@@ -98,23 +100,25 @@ fn interactive_multiselect(options: &[Source]) -> Result<Option<Vec<Source>>> {
         hover = (hover + 1) % options.len();
       }
       KeyCode::Char(' ') => checked[hover] = !checked[hover],
-      KeyCode::Enter => {
-        let selected: Vec<Source> = options
-          .iter()
-          .zip(&checked)
-          .filter_map(|(source, &on)| on.then_some(*source))
-          .collect();
-        return Ok(if selected.is_empty() {
-          None
-        } else {
-          Some(selected)
-        });
-      }
+      KeyCode::Enter => return Ok(confirmed_selection(options, &checked)),
       KeyCode::Esc | KeyCode::Char('q') => return Ok(None),
-      KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(None),
+      KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        return Err(QuitDuringOnboarding.into())
+      }
       _ => {}
     }
   }
+}
+
+/// The checked sources in display order, or `None` (a skip) when nothing is
+/// checked: Enter on an unchecked row does not pick it.
+fn confirmed_selection(options: &[Source], checked: &[bool]) -> Option<Vec<Source>> {
+  let selected: Vec<Source> = options
+    .iter()
+    .zip(checked)
+    .filter_map(|(source, &on)| on.then_some(*source))
+    .collect();
+  (!selected.is_empty()).then_some(selected)
 }
 
 /// Restores cooked terminal mode when dropped, so any exit path out of the
@@ -158,5 +162,25 @@ fn prompt_choice(max: usize) -> Result<usize> {
         }
       }
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  const OPTIONS: [Source; 3] = [Source::Spotify, Source::Radio, Source::Local];
+
+  #[test]
+  fn enter_with_nothing_checked_is_a_skip() {
+    assert_eq!(confirmed_selection(&OPTIONS, &[false; 3]), None);
+  }
+
+  #[test]
+  fn enter_returns_the_checked_sources_in_display_order() {
+    assert_eq!(
+      confirmed_selection(&OPTIONS, &[true, false, true]),
+      Some(vec![Source::Spotify, Source::Local])
+    );
   }
 }

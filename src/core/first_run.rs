@@ -6,6 +6,8 @@
 //! through to the existing auth wizard; picking a free source seeds a default
 //! `client.yml` (so Spotify can still be added later via in-TUI login), records
 //! the choice as the active source, and collects any source-specific config.
+//! Skipping the picker seeds the same `client.yml` and starts with no source,
+//! running no wizard.
 //!
 //! Only sources whose Cargo feature is compiled in are offered. A build with just
 //! Spotify (the slim build) shows no picker and keeps the original
@@ -73,9 +75,16 @@ pub async fn run_first_run_picker(
 
   let selections = match onboarding.pick_sources(&options)? {
     Some(selected) => selected,
-    // Cancelled (esc / ctrl-c) or nothing checked: fall through to the Spotify
-    // wizard, matching the historical default.
-    None => return Ok(()),
+    // Skipped (nothing checked, or esc): start with no source and no wizard.
+    // Seed `client.yml` as a pick without Spotify does, so `load_config` runs
+    // no wizard and the next launch is not a first run.
+    None => {
+      client_config.init_default_spotify_config()?;
+      onboarding.info(
+        "\nStarting spotatui with no source. Press `d` anytime to choose one or to log in to Spotify.\n",
+      );
+      return Ok(());
+    }
   };
 
   apply_selections(

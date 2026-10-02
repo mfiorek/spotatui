@@ -48,6 +48,20 @@ pub(crate) fn confirm_answer(raw: &str) -> OnboardingAnswer {
   }
 }
 
+/// The user quit at a first-run question (Ctrl-C in the terminal source
+/// picker). Not a failure: `run_cli` exits successfully, and with no
+/// `client.yml` written the next launch starts the first run again.
+#[derive(Debug)]
+pub struct QuitDuringOnboarding;
+
+impl std::fmt::Display for QuitDuringOnboarding {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str("quit during the first-run setup")
+  }
+}
+
+impl std::error::Error for QuitDuringOnboarding {}
+
 pub trait Onboarding: Send + Sync {
   /// Whether this frontend can ask questions at all. The terminal frontend
   /// checks stdin and stdout; a windowed frontend answers true while its
@@ -86,8 +100,9 @@ pub trait Onboarding: Send + Sync {
   }
 
   /// First-run source picker over the compiled-in `options`. `None` means the
-  /// user cancelled or confirmed with nothing selected (the caller falls
-  /// through to the Spotify wizard, matching the historical default).
+  /// user skipped (confirmed with nothing selected, or dismissed the picker):
+  /// the app starts with no source and runs no wizard. A frontend that lets
+  /// the user quit returns [`QuitDuringOnboarding`] as the error.
   fn pick_sources(&self, options: &[Source]) -> Result<Option<Vec<Source>>>;
 }
 

@@ -97,7 +97,7 @@ function Question({
         >
           <h2>Choose your music sources</h2>
           <p>
-            Leave all unchecked to set up Spotify only; you can add or switch
+            Leave all unchecked to start with no source; you can add or switch
             sources later.
           </p>
           {ask.options.map(({ source, label, note }) => (

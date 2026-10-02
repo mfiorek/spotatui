@@ -88,14 +88,13 @@ impl crate::core::onboarding::Onboarding for HeadlessOnboarding {
     _options: &[crate::core::source::Source],
   ) -> Result<Option<Vec<crate::core::source::Source>>> {
     // Only a UI launch runs the first-run picker, and headless builds return
-    // before boot in that case; fall through to the Spotify wizard if this is
-    // ever reached anyway.
+    // before boot in that case; skip it if this is ever reached anyway.
     Ok(None)
   }
 }
 
 pub async fn run_cli() -> Result<()> {
-  let result = run_cli_inner().await;
+  let result = quit_is_success(run_cli_inner().await);
   // A failing run is the one that gets reported, so it needs the log path
   // most — and `?` inside carries every failure straight past the notice at
   // the bottom. Checked rather than assumed: `setup_logging` is itself one of
@@ -259,6 +258,14 @@ async fn run_cli_inner() -> Result<()> {
 }
 
 /// A second UI launch refused by the instance lock is expected, not a failure to report.
+/// A quit at the first-run picker ends the run successfully.
+fn quit_is_success(result: Result<()>) -> Result<()> {
+  match result {
+    Err(e) if e.is::<crate::core::onboarding::QuitDuringOnboarding>() => Ok(()),
+    other => other,
+  }
+}
+
 fn is_instance_refusal(error: &anyhow::Error) -> bool {
   #[cfg(feature = "tui")]
   {
@@ -287,6 +294,18 @@ fn completion_shell(name: &str) -> Option<Shell> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn a_quit_at_the_source_picker_ends_the_run_successfully() {
+    let quit = Err(anyhow::Error::new(
+      crate::core::onboarding::QuitDuringOnboarding,
+    ));
+    assert!(quit_is_success(quit).is_ok());
+    let wrapped =
+      Err(anyhow::Error::new(crate::core::onboarding::QuitDuringOnboarding).context("first run"));
+    assert!(quit_is_success(wrapped).is_ok());
+    assert!(quit_is_success(Err(anyhow::anyhow!("boom"))).is_err());
+  }
 
   #[test]
   fn completion_shell_maps_both_powershell_spellings() {
