@@ -535,21 +535,42 @@ fn spawn_fetch(
   session.fetch = Some(task.abort_handle());
 }
 
+/// What a failed fetch does to the session.
+#[derive(Debug, PartialEq, Eq)]
+enum FailedFetch {
+  /// The session moved on to another fetch, or is gone: nothing to do.
+  Stale,
+  /// The native queue owns the sink: the session stays for its resume.
+  KeepForQueue,
+  /// Tear the session down and report the error.
+  Teardown,
+}
+
+/// `session_fetch_id` is the stamp of the live session, if any.
+fn failed_fetch(session_fetch_id: Option<u64>, fetch_id: u64, queue_owns: bool) -> FailedFetch {
+  if session_fetch_id != Some(fetch_id) {
+    FailedFetch::Stale
+  } else if queue_owns {
+    FailedFetch::KeepForQueue
+  } else {
+    FailedFetch::Teardown
+  }
+}
+
 /// A failed fetch: tear the session down only if it still waits for this
 /// fetch, and report the error. A teardown rather than a skip: a skip would
 /// walk the list at tick speed when every track fails the same way. Under the
 /// native queue the session stays for the queue's resume, which fetches again.
 async fn fail_fetch(app: &Arc<Mutex<App>>, fetch_id: u64, step: &str, err: anyhow::Error) {
   let mut guard = app.lock().await;
-  if guard
-    .tidal_playback()
-    .is_none_or(|s| s.fetch_id != fetch_id)
-  {
-    return;
-  }
-  if guard.queue_owns_playback() {
-    log::warn!("[tidal] {step}: {err:#}");
-    return;
+  let session_fetch_id = guard.tidal_playback().map(|s| s.fetch_id);
+  match failed_fetch(session_fetch_id, fetch_id, guard.queue_owns_playback()) {
+    FailedFetch::Stale => return,
+    FailedFetch::KeepForQueue => {
+      log::warn!("[tidal] {step}: {err:#}");
+      return;
+    }
+    FailedFetch::Teardown => {}
   }
   let session = guard.set_tidal_playback(None);
   report_locked(&mut guard, step, err);
@@ -557,6 +578,14 @@ async fn fail_fetch(app: &Arc<Mutex<App>>, fetch_id: u64, step: &str, err: anyho
   if let Some(s) = session {
     Arc::clone(&s.player).stop_detached();
   }
+}
+
+/// Whether a staged track starts paused. A pause pressed during the fetch
+/// window applies to the previous track's sink and carries over; a fresh
+/// player starts paused, so it counts only once it `played_before`. A paused
+/// resume point (a restore, a replay) pauses it too.
+fn starts_paused(played_before: bool, player_paused: bool, resume: Option<ResumePoint>) -> bool {
+  (played_before && player_paused) || resume.is_some_and(|r| r.paused)
 }
 
 /// Play the prepared stream and finalize the session. The previous track is
@@ -574,17 +603,15 @@ async fn commit_fetch(app: &Arc<Mutex<App>>, fetch_id: u64, prepared: PreparedTr
     guard
       .tidal_playback()
       .filter(|s| s.fetch_id == fetch_id)
-      // A pause pressed during the fetch window applies to the previous
-      // track's sink; a fresh player starts paused, so only a session that
-      // already played something counts.
       .map(|s| {
         (
           Arc::clone(&s.player),
-          s.tempfile.is_some() && s.player.is_paused(),
+          s.tempfile.is_some(),
+          s.player.is_paused(),
         )
       })
   };
-  let Some((player, was_paused)) = claimed else {
+  let Some((player, played_before, player_paused)) = claimed else {
     return;
   };
   let stop_player = Arc::clone(&player);
@@ -618,7 +645,7 @@ async fn commit_fetch(app: &Arc<Mutex<App>>, fetch_id: u64, prepared: PreparedTr
     s.fetch = None;
     (s.resume_at.take(), volume)
   };
-  let paused = was_paused || resume.is_some_and(|r| r.paused);
+  let paused = starts_paused(played_before, player_paused, resume);
   let stage_player = Arc::clone(&player);
   let staged = tokio::task::spawn_blocking(move || {
     stage_player.stage_prepared(stream)?;
@@ -778,6 +805,25 @@ enum Replay {
   Pending,
 }
 
+/// Where a replay reads the current track from.
+#[derive(Debug, PartialEq, Eq)]
+enum ReplayFrom {
+  Pending,
+  File,
+  Fetch,
+}
+
+/// A replay waits for a download still running, restages a file only when
+/// every byte arrived (a forward seek can leave a gap that was never filled),
+/// and otherwise fetches the track again.
+fn replay_from(has_file: bool, file_complete: bool) -> ReplayFrom {
+  match (has_file, file_complete) {
+    (false, _) => ReplayFrom::Pending,
+    (true, true) => ReplayFrom::File,
+    (true, false) => ReplayFrom::Fetch,
+  }
+}
+
 /// Replay the current track (repeat-one, device recovery). Returns `true` if
 /// Tidal owns the session.
 async fn replay_current(app: &Arc<Mutex<App>>) -> bool {
@@ -787,18 +833,17 @@ async fn replay_current(app: &Arc<Mutex<App>>) -> bool {
       return false;
     };
     s.advancing = true;
-    if s.tempfile.is_none() {
+    let from = replay_from(s.tempfile.is_some(), s.file_is_complete());
+    if from == ReplayFrom::Pending {
       Replay::Pending
     } else {
       let resume = s.resume_at.take().unwrap_or(ResumePoint {
         position_ms: 0,
         paused: s.player.is_paused(),
       });
-      match s.tempfile.as_ref() {
-        Some(t) if s.file_is_complete() => {
-          Replay::File(Arc::clone(&s.player), t.path().to_path_buf(), Some(resume))
-        }
-        _ => Replay::Fetch(s.index, resume),
+      match s.tempfile.as_ref().filter(|_| from == ReplayFrom::File) {
+        Some(t) => Replay::File(Arc::clone(&s.player), t.path().to_path_buf(), Some(resume)),
+        None => Replay::Fetch(s.index, resume),
       }
     }
   };
@@ -1027,5 +1072,132 @@ mod tests {
     let shown_at = Instant::now();
     let (_, ttl) = login_url_status("u", shown_at, shown_at + Duration::from_secs(900));
     assert_eq!(ttl, 1);
+  }
+
+  fn fake_login() -> Arc<super::super::client::TidalClient> {
+    Arc::new(super::super::client::TidalClient::new(
+      ClientCredentials {
+        id: "client-id".into(),
+        secret: "client-secret".into(),
+      },
+      auth::TidalCredentials {
+        client_id: "client-id".into(),
+        access_token: "access".into(),
+        refresh_token: "refresh".into(),
+        token_type: "Bearer".into(),
+        expires_at: u64::MAX,
+        user_id: String::new(),
+        country_code: String::new(),
+      },
+      None,
+    ))
+  }
+
+  // The in-memory login is process-wide and tests run in parallel, so this is
+  // the only test that reports a `LoginRequired`.
+  #[test]
+  fn only_a_refused_login_clears_the_login_and_reports_it_expired() {
+    let mut app = App::default();
+    super::super::set_login(Some(fake_login()));
+
+    report_locked(&mut app, "tracks", anyhow::anyhow!("timed out"));
+    assert!(super::super::current_login().is_some());
+
+    let refused = anyhow::Error::from(auth::LoginRequired("Tidal refused the login"))
+      .context("loading the playlist");
+    report_locked(&mut app, "tracks", refused);
+    assert!(super::super::current_login().is_none());
+    assert_eq!(app.status_message(), Some(LOGIN_EXPIRED));
+    assert!(app.status_message_is_error());
+  }
+
+  #[test]
+  fn any_other_failure_is_a_plain_status_naming_the_step_and_cause() {
+    let mut app = App::default();
+
+    report_locked(
+      &mut app,
+      "search",
+      anyhow::anyhow!("connection reset").context("searching"),
+    );
+
+    assert_eq!(
+      app.status_message(),
+      Some("Tidal: search: searching: connection reset")
+    );
+    assert!(!app.status_message_is_error());
+  }
+
+  #[tokio::test]
+  async fn spotify_transport_falls_through_without_a_tidal_session() {
+    use rspotify::model::enums::RepeatState;
+    let app = Arc::new(Mutex::new(App::default()));
+    let events = [
+      IoEvent::StartPlayback(None, None, None),
+      IoEvent::StartPlayback(Some("spotify:track:1".into()), None, None),
+      IoEvent::StartPlayback(None, Some(vec!["spotify:track:1".into()]), Some(0)),
+      IoEvent::PausePlayback,
+      IoEvent::Seek(1_000),
+      IoEvent::ChangeVolume(40),
+      IoEvent::NextTrack,
+      IoEvent::PreviousTrack,
+      IoEvent::ForcePreviousTrack,
+      IoEvent::ReplayCurrentTrack,
+      IoEvent::Repeat(RepeatState::Track),
+    ];
+    for (i, event) in events.iter().enumerate() {
+      assert!(!route_tidal_event(&app, event).await, "event {i}");
+    }
+    assert!(app.lock().await.tidal_playback().is_none());
+  }
+
+  #[test]
+  fn only_the_live_fetch_of_a_session_reports_its_failure() {
+    assert_eq!(failed_fetch(None, 7, false), FailedFetch::Stale);
+    assert_eq!(failed_fetch(Some(8), 7, false), FailedFetch::Stale);
+    assert_eq!(failed_fetch(Some(7), 7, false), FailedFetch::Teardown);
+  }
+
+  #[test]
+  fn a_failed_fetch_under_the_native_queue_keeps_the_session() {
+    assert_eq!(failed_fetch(Some(7), 7, true), FailedFetch::KeepForQueue);
+    assert_eq!(failed_fetch(Some(8), 7, true), FailedFetch::Stale);
+  }
+
+  #[test]
+  fn a_fresh_player_starts_the_first_track_playing() {
+    assert!(!starts_paused(false, true, None));
+  }
+
+  #[test]
+  fn a_pause_during_the_fetch_carries_over_to_the_next_track() {
+    assert!(starts_paused(true, true, None));
+    assert!(!starts_paused(true, false, None));
+  }
+
+  #[test]
+  fn a_paused_resume_point_starts_the_track_paused() {
+    let paused = ResumePoint {
+      position_ms: 5_000,
+      paused: true,
+    };
+    let playing = ResumePoint {
+      paused: false,
+      ..paused
+    };
+    assert!(starts_paused(false, false, Some(paused)));
+    assert!(!starts_paused(false, true, Some(playing)));
+    assert!(starts_paused(true, true, Some(playing)));
+  }
+
+  #[test]
+  fn a_replay_waits_for_the_first_download() {
+    assert_eq!(replay_from(false, false), ReplayFrom::Pending);
+  }
+
+  #[test]
+  fn a_replay_restages_only_a_complete_file() {
+    assert_eq!(replay_from(true, true), ReplayFrom::File);
+    assert_eq!(replay_from(true, false), ReplayFrom::Fetch);
   }
 }

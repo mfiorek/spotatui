@@ -827,6 +827,21 @@ mod tests {
     assert!(app.active_source_position_ms().is_none());
   }
 
+  #[cfg(feature = "tidal")]
+  #[test]
+  fn a_tidal_claim_owns_playback_before_its_session_lands() {
+    let mut app = make_app_simple();
+    app.claim_decoded_sink(Source::Tidal);
+
+    assert!(app.tidal_playback().is_none());
+    assert!(app.active_decoded_source());
+    assert_eq!(app.playback_owner(), PlaybackOwner::Decoded);
+    assert!(!app.native_should_drive());
+    assert!(!app.native_context_should_drive());
+    assert!(!app.active_queueable_decoded_source());
+    assert!(app.active_source_position_ms().is_none());
+  }
+
   #[test]
   fn a_native_queue_change_moves_the_queue_revision_once() {
     let mut app = make_app_simple();

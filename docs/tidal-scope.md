@@ -180,22 +180,22 @@ From `AGENTS.md` and the per-directory `AGENTS.md` files:
 1. **Read first.** Root `AGENTS.md`; the `AGENTS.md` files in
    `src/infra/{qobuz,audio,queue,network}/` and `src/core/app/`; all of
    `src/infra/qobuz/`; and PR #489.
-2. **Skeleton.**
+2. **Skeleton.** Done (2026-10-02).
    - Add the `tidal` feature and include it in `all-sources`.
    - Add `Source::Tidal` with its capability flags and tests.
    - Add an empty `src/infra/tidal/` and regenerate the GUI bindings.
-3. **Auth.**
+3. **Auth.** Done (2026-10-02).
    - Port the device flow, credential storage and silent refresh.
    - Read the client ID and secret from config or env, never from the source
      tree.
    - Add the first-run and onboarding steps (TUI and `gui/onboarding.rs`).
-4. **Browsing.**
+4. **Browsing.** Done (2026-10-02).
    - Port the API client and types, mapped into `core::plugin_api`.
    - Add sidebar rows (favorite tracks, playlists, favorite albums) and
      search.
    - Add `TrackTableContext::TidalPlaylist` and the `core/requirement.rs`
      rows.
-5. **Streaming: BTS.**
+5. **Streaming: BTS.** Done (2026-10-02).
    - Fetch direct URLs into a `NamedTempFile` through the Qobuz
      download/queue path.
    - Add `TidalPlaybackState`, routing and the playback-ownership arms.
@@ -203,22 +203,28 @@ From `AGENTS.md` and the per-directory `AGENTS.md` files:
 
    **Milestone: usable in the TUI.** Build with `--features tidal` and use
    it daily; let real use drive what comes next.
-6. **Streaming: DASH hi-res.** Parse the manifest, then fetch and concatenate
-   the segments, seeking via `stream-download` as Qobuz does.
-7. **Integrations.**
+6. **Streaming: DASH hi-res.** Done (2026-10-02). Parse the manifest, then
+   fetch and concatenate the segments, seeking via `stream-download` as
+   Qobuz does.
+7. **Integrations.** Done (2026-10-02).
    - The native queue, `queue_suspend`, session restore
      (`persisted_playback.rs`) and shuffle/repeat.
    - MPRIS/SMTC/Discord metadata, cover art and the play counter.
    - Playlist sync and the DJ tools.
    - The `gui/` frontend.
-8. **Setting.** `behavior.tidal_quality`. Optionally try the Android PKCE
-   client for full-catalog FLAC.
-9. **Tests, alongside each step.**
+8. **Setting.** Done (2026-10-02). `behavior.tidal_quality`. Optionally try
+   the Android PKCE client for full-catalog FLAC (not tried yet).
+9. **Tests, alongside each step.** Done (2026-10-02).
    - Unit tests for the pure parts: manifest parsing, DASH, mapping, URI
      parsing.
    - An `#[ignore]`d `live_tidal` test.
    - Colocated `#[cfg(test)]` modules, with test names that read as behavior
      sentences.
+   - Not covered: whatever needs a live `TidalPlaybackState`, since its
+     `LocalPlayer` opens an audio device. That is skip, replay, the fetch
+     commit and failure end to end, `take_decoded_sessions_except`, and the
+     media-metadata snapshot. Their decisions are pure functions in
+     `dispatch.rs` with tests of their own.
 
 ## Checks while working in the fork
 
