@@ -39,7 +39,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use tempfile::NamedTempFile;
@@ -698,6 +698,22 @@ async fn teardown_tidal(app: &Arc<Mutex<App>>) {
 // ---------------------------------------------------------------------------
 
 static LOGIN_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+/// The URL of the device login waiting for the user, and when it was shown;
+/// a repeated login request shows it again instead of replacing it.
+static PENDING_LOGIN: std::sync::Mutex<Option<(String, Instant)>> = std::sync::Mutex::new(None);
+
+fn set_pending_login(pending: Option<(String, Instant)>) {
+  *PENDING_LOGIN.lock().unwrap_or_else(|e| e.into_inner()) = pending;
+}
+
+/// The status line of a login waiting for the user, and its remaining TTL.
+fn login_url_status(url: &str, shown_at: Instant, now: Instant) -> (String, u64) {
+  let elapsed = now.saturating_duration_since(shown_at).as_secs();
+  (
+    format!("Tidal: open {url} to log in (waiting up to 5 minutes)"),
+    LOGIN_URL_TTL_SECS.saturating_sub(elapsed).max(1),
+  )
+}
 
 /// Make sure a login is in place, on a detached task so the pump keeps running.
 async fn begin_login(app: &Arc<Mutex<App>>) {
@@ -710,7 +726,17 @@ async fn begin_login(app: &Arc<Mutex<App>>) {
     return;
   }
   if LOGIN_IN_PROGRESS.swap(true, Ordering::SeqCst) {
-    set_status(app, "Tidal login already in progress...", 6).await;
+    let pending = PENDING_LOGIN
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .clone();
+    match pending {
+      Some((url, shown_at)) => {
+        let (message, ttl) = login_url_status(&url, shown_at, Instant::now());
+        set_status(app, message, ttl).await;
+      }
+      None => set_status(app, "Tidal login already in progress...", 6).await,
+    }
     return;
   }
   let app = Arc::clone(app);
@@ -756,14 +782,14 @@ async fn run_login(app: &Arc<Mutex<App>>, client: ClientCredentials) {
   if let Err(e) = open::that_detached(&url) {
     log::warn!("[tidal] failed to open the browser: {e}");
   }
-  set_status(
-    app,
-    format!("Tidal: open {url} to log in (waiting up to 5 minutes)"),
-    LOGIN_URL_TTL_SECS,
-  )
-  .await;
+  let shown_at = Instant::now();
+  let (message, ttl) = login_url_status(&url, shown_at, shown_at);
+  set_status(app, message, ttl).await;
+  set_pending_login(Some((url, shown_at)));
 
-  match super::finish_login(&login).await {
+  let outcome = super::finish_login(&login).await;
+  set_pending_login(None);
+  match outcome {
     Ok(_) => {
       set_status(app, "Tidal: logged in", 4).await;
       reload_sidebar(app).await;
@@ -772,5 +798,32 @@ async fn run_login(app: &Arc<Mutex<App>>, client: ClientCredentials) {
       log::warn!("[tidal] login failed: {e:#}");
       set_status(app, format!("Tidal login failed: {e:#}"), 10).await;
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn a_repeated_login_request_shows_the_url_for_the_time_left() {
+    let shown_at = Instant::now();
+    let (message, ttl) = login_url_status(
+      "https://link.tidal.com/ABCDE",
+      shown_at,
+      shown_at + Duration::from_secs(100),
+    );
+    assert!(
+      message.contains("https://link.tidal.com/ABCDE"),
+      "{message}"
+    );
+    assert_eq!(ttl, LOGIN_URL_TTL_SECS - 100);
+  }
+
+  #[test]
+  fn an_expired_login_url_still_shows_for_a_moment() {
+    let shown_at = Instant::now();
+    let (_, ttl) = login_url_status("u", shown_at, shown_at + Duration::from_secs(900));
+    assert_eq!(ttl, 1);
   }
 }
