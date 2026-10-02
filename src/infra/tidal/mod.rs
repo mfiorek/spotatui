@@ -1080,7 +1080,8 @@ mod tests {
   /// Opens a hi-res track and one without a hi-res master through the
   /// playback path: the manifest, the download into a tempfile (DASH
   /// segments or the BTS file) and a decoder over it, which probes the
-  /// container. No audio device needed.
+  /// container. Then asks for the hi-res track at LOW, which must come back
+  /// as AAC 96. No audio device needed.
   ///
   /// `cargo test --features tidal -- --ignored live_tidal_stream --nocapture`
   #[tokio::test(flavor = "multi_thread")]
@@ -1092,24 +1093,28 @@ mod tests {
     let source = TidalSource::new(restore_login(client).await.expect("a saved login"));
 
     // Hi-res as of 2026-10, then a track Tidal has no hi-res master of.
-    for query in ["Taylor Swift The Fate of Ophelia", "Daft Punk Get Lucky"] {
+    let hi_res = "Taylor Swift The Fate of Ophelia";
+    for (query, quality) in [
+      (hi_res, manifest::HI_RES_QUALITY),
+      ("Daft Punk Get Lucky", manifest::HI_RES_QUALITY),
+      (hi_res, "LOW"),
+    ] {
       let results = source.search(query).await.expect("search");
       let track = results.tracks.first().expect("a search hit");
       let uri = track.uri.as_deref().expect("a track URI");
       let started = std::time::Instant::now();
-      let prepared = dispatch::prepare_track(
-        &source,
-        track_id_from_uri(uri).unwrap(),
-        manifest::HI_RES_QUALITY,
-      )
-      .await
-      .expect("a playable stream");
+      let prepared = dispatch::prepare_track(&source, track_id_from_uri(uri).unwrap(), quality)
+        .await
+        .expect("a playable stream");
       println!(
-        "{}: {} in {:?}",
+        "{} at {quality}: {} in {:?}",
         track.name,
         prepared.delivered.label(),
         started.elapsed()
       );
+      if quality == "LOW" {
+        assert_eq!(prepared.delivered, Delivered::Low);
+      }
     }
   }
 }

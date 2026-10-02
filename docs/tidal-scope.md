@@ -230,8 +230,15 @@ cargo clippy --no-default-features --features telemetry,tui -- -D warnings
 cargo test --no-default-features --features telemetry,tui
 cargo clippy --features all-sources -- -D warnings
 cargo test --features all-sources
-cargo test --features tidal -- --ignored live_tidal --nocapture
+cargo test --features tidal -- --ignored live_tidal --nocapture --test-threads=1
 ```
+
+The live tests run one at a time: the API client (`shared_tidal_client`) is
+one per process, and each `#[tokio::test]` has its own runtime, so a pooled
+connection left by a finished test fails the next one ("runtime dropped the
+dispatch task"). The app has one runtime, so only the tests are affected.
+`live_tidal_login` is the interactive device flow and reads
+`SPOTATUI_TIDAL_CLIENT_ID` from the environment only; without it, it fails.
 
 Keeping these green as you go is what keeps upstreaming cheap later.
 
