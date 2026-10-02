@@ -346,6 +346,10 @@ impl App {
     if self.qobuz_playback.is_some() {
       return true;
     }
+    #[cfg(feature = "tidal")]
+    if self.tidal_playback.is_some() {
+      return true;
+    }
     #[cfg(feature = "internet-radio")]
     if self.radio_playback.is_some() {
       return true;
@@ -383,11 +387,51 @@ impl App {
     if self.qobuz_playback.is_some() {
       return true;
     }
+    #[cfg(feature = "tidal")]
+    if self.tidal_playback.is_some() {
+      return true;
+    }
     #[cfg(feature = "youtube")]
     if self.youtube_playback.is_some() {
       return true;
     }
     false
+  }
+
+  /// The Tidal playback session, if Tidal owns (or is staging) playback.
+  #[cfg(feature = "tidal")]
+  pub(crate) fn tidal_playback(&self) -> Option<&crate::infra::tidal::TidalPlaybackState> {
+    self.tidal_playback.as_ref()
+  }
+
+  #[cfg(feature = "tidal")]
+  pub(crate) fn tidal_playback_mut(
+    &mut self,
+  ) -> Option<&mut crate::infra::tidal::TidalPlaybackState> {
+    self.tidal_playback.as_mut()
+  }
+
+  /// Whether the active decoded context is a Tidal session, which the native
+  /// queue cannot suspend yet: a manual skip stays in the Tidal list, and
+  /// queued items wait until it ends.
+  pub(crate) fn tidal_ignores_native_queue(&self) -> bool {
+    #[cfg(feature = "tidal")]
+    {
+      self.tidal_playback.is_some() && !self.queue_owns_playback()
+    }
+    #[cfg(not(feature = "tidal"))]
+    {
+      false
+    }
+  }
+
+  /// Replace the Tidal session; dropping the previous one aborts its download.
+  #[cfg(feature = "tidal")]
+  pub(crate) fn set_tidal_playback(
+    &mut self,
+    session: Option<crate::infra::tidal::TidalPlaybackState>,
+  ) -> Option<crate::infra::tidal::TidalPlaybackState> {
+    std::mem::replace(&mut self.tidal_playback, session)
   }
 
   /// Take every decoded session except `keep`'s, so one backend can own the
@@ -412,6 +456,10 @@ impl App {
     #[cfg(feature = "qobuz")]
     if keep != Source::Qobuz {
       players.extend(self.qobuz_playback.take().map(|s| Arc::clone(&s.player)));
+    }
+    #[cfg(feature = "tidal")]
+    if keep != Source::Tidal {
+      players.extend(self.tidal_playback.take().map(|s| Arc::clone(&s.player)));
     }
     #[cfg(feature = "internet-radio")]
     if keep != Source::Radio {
@@ -446,6 +494,10 @@ impl App {
       }
       #[cfg(feature = "qobuz")]
       if let Some(s) = &self.qobuz_playback {
+        return s.advancing;
+      }
+      #[cfg(feature = "tidal")]
+      if let Some(s) = &self.tidal_playback {
         return s.advancing;
       }
       #[cfg(feature = "youtube")]
@@ -488,6 +540,10 @@ impl App {
     if let Some(s) = &self.qobuz_playback {
       return Some(&s.player);
     }
+    #[cfg(feature = "tidal")]
+    if let Some(s) = &self.tidal_playback {
+      return Some(&s.player);
+    }
     #[cfg(feature = "internet-radio")]
     if let Some(s) = &self.radio_playback {
       return Some(&s.player);
@@ -527,6 +583,10 @@ impl App {
     #[cfg(feature = "qobuz")]
     if let Some(qobuz) = &self.qobuz_playback {
       return Some(qobuz.player.position().as_millis());
+    }
+    #[cfg(feature = "tidal")]
+    if let Some(tidal) = &self.tidal_playback {
+      return Some(tidal.player.position().as_millis());
     }
     #[cfg(feature = "youtube")]
     if let Some(youtube) = &self.youtube_playback {

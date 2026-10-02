@@ -3,26 +3,24 @@
 //! [`SegmentStream`] is a `stream-download` source over the segment transport.
 //! It yields the codec header, then each decrypted audio segment in order, and
 //! restarts at any byte offset when the decoder seeks past the downloaded
-//! part. `stream-download` writes the bytes into the session's tempfile
-//! ([`TempfileStorage`]), blocks the decoder's reads until they exist, and
-//! stops the download when the reader is dropped. The session keeps the
+//! part. [`crate::infra::progressive`] writes the bytes into the session's
+//! tempfile, blocks the decoder's reads until they exist, and stops the
+//! download when the reader is dropped. The session keeps the
 //! `NamedTempFile`, so the finished file outlives the reader (repeat-one).
 
 use std::convert::Infallible;
-use std::fs::File;
 use std::future::Future;
-use std::io::{self, BufReader};
+use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use anyhow::{anyhow, Context as _, Result};
+use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use futures::Stream;
 use reqwest::Client;
 use stream_download::source::SourceStream;
-use stream_download::storage::StorageProvider;
-use stream_download::{Settings, StreamDownload};
+use stream_download::Settings;
 use tempfile::NamedTempFile;
 use tokio::task::JoinHandle;
 
@@ -39,46 +37,15 @@ const PREFETCH_BYTES: u64 = 512 * 1024;
 /// and counts as an attempt.
 const STALL_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// The reader the decoder pulls from; dropping it cancels the download.
-pub type TrackReader = StreamDownload<TempfileStorage>;
+pub use crate::infra::progressive::TrackReader;
 
 /// Start the download into `file` and return the decoder's reader.
 pub async fn open(stream: SegmentStream, file: &NamedTempFile) -> Result<TrackReader> {
-  let storage = TempfileStorage::new(file).context("reopening stream file")?;
   let settings = Settings::default()
     .prefetch_bytes(PREFETCH_BYTES)
     .retry_timeout(STALL_TIMEOUT);
-  StreamDownload::from_stream(stream, storage, settings)
-    .await
-    .map_err(|e| anyhow!("{e}"))
-}
-
-/// Storage over the session's own tempfile: one reopened handle for the
-/// download's writes and one for the decoder's reads.
-pub struct TempfileStorage {
-  reader: File,
-  writer: File,
-}
-
-impl TempfileStorage {
-  fn new(file: &NamedTempFile) -> io::Result<Self> {
-    Ok(Self {
-      reader: file.reopen()?,
-      writer: file.reopen()?,
-    })
-  }
-}
-
-impl StorageProvider for TempfileStorage {
-  type Reader = BufReader<File>;
-  type Writer = File;
-
-  fn into_reader_writer(
-    self,
-    _content_length: Option<u64>,
-  ) -> io::Result<(Self::Reader, Self::Writer)> {
-    Ok((BufReader::new(self.reader), self.writer))
-  }
+  let (reader, _) = crate::infra::progressive::open(stream, file, settings).await?;
+  Ok(reader)
 }
 
 /// A track as a byte stream: chunk 0 is the codec header, chunk `i >= 1` is

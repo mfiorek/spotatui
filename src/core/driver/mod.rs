@@ -430,22 +430,30 @@ impl Driver {
     // on the session as `resume_at`, applied by the path that stages the
     // track, never as events queued behind it.
     #[cfg(feature = "audio-decode-queue")]
+    //
+    // Two arms: a public `*_playback` field, or a private one (Tidal) through
+    // its accessors. The field arm forwards into the accessor arm.
     macro_rules! decoded_device_recovery {
       ($app:ident, $playback:ident) => {
+        decoded_device_recovery!(
+          $app,
+          get: $app.$playback.as_ref(),
+          get_mut: $app.$playback.as_mut(),
+          clear: $app.$playback = None
+        )
+      };
+      ($app:ident, get: $get:expr, get_mut: $get_mut:expr, clear: $clear:expr) => {
         // Not while the queue owns the sink: the session below is suspended, and
         // its player is the *same* handle the queue slot is using (see
         // `suspended_context_player`). The queue branch further down recovers it.
         if !$app.queue_owns_playback()
-          && $app
-            .$playback
-            .as_ref()
-            .is_some_and(|s| s.player.device_lost())
+          && $get.is_some_and(|s| s.player.device_lost())
         {
           use crate::infra::audio::Reopen;
           // Read before the reopen: it swaps in a fresh sink that is paused,
           // empty, and reports no removal. A change already in flight stages a
           // different track, so its position is the top.
-          let (position_ms, paused) = $app.$playback.as_ref().map_or((0, false), |s| {
+          let (position_ms, paused) = $get.map_or((0, false), |s| {
             (
               if s.advancing {
                 0
@@ -455,12 +463,12 @@ impl Driver {
               s.player.device_removed() || s.player.is_paused(),
             )
           });
-          match $app.$playback.as_ref().map(|s| s.player.recover_device()) {
+          match $get.map(|s| s.player.recover_device()) {
             Some(Reopen::Reopened) => {
               // The fresh sink is empty, so `is_finished()` is true from here
               // on: hold the advance latch or the block below would read that
               // as end-of-track and skip a song while the replay is in flight.
-              if let Some(s) = $app.$playback.as_mut() {
+              if let Some(s) = $get_mut {
                 s.advancing = true;
                 s.resume_at = Some(crate::infra::queue::ResumePoint {
                   position_ms,
@@ -481,7 +489,7 @@ impl Driver {
               $app.set_status_message("Audio output device lost - waiting for a new one.", 8);
             }
             Some(Reopen::GaveUp) => {
-              $app.$playback = None;
+              $clear;
               $app.set_status_message("Audio output device disconnected.", 8);
             }
             Some(Reopen::Waiting) | None => {}
@@ -495,6 +503,13 @@ impl Driver {
     decoded_device_recovery!(app, subsonic_playback);
     #[cfg(feature = "qobuz")]
     decoded_device_recovery!(app, qobuz_playback);
+    #[cfg(feature = "tidal")]
+    decoded_device_recovery!(
+      app,
+      get: app.tidal_playback(),
+      get_mut: app.tidal_playback_mut(),
+      clear: app.set_tidal_playback(None)
+    );
     #[cfg(feature = "youtube")]
     decoded_device_recovery!(app, youtube_playback);
 
@@ -617,13 +632,33 @@ impl Driver {
     // for Subsonic/YouTube, multi-second download — window; without it the
     // next tick would re-dispatch and skip several tracks per advance.
     #[cfg(feature = "audio-decode-queue")]
+    //
+    // Two arms, as for `decoded_device_recovery!`; the accessor arm also takes
+    // the native-queue length the plan sees.
     macro_rules! decoded_auto_advance {
       ($app:ident, $playback:ident, $queue:ident) => {
+        decoded_auto_advance!(
+          $app,
+          $queue,
+          get: $app.$playback.as_ref(),
+          get_mut: $app.$playback.as_mut(),
+          clear: $app.$playback = None,
+          queue_len: $app.native_queue.len()
+        )
+      };
+      (
+        $app:ident,
+        $queue:ident,
+        get: $get:expr,
+        get_mut: $get_mut:expr,
+        clear: $clear:expr,
+        queue_len: $queue_len:expr
+      ) => {
         if !$app.queue_owns_playback() {
           use crate::infra::queue::next_index;
-          let queue_len = $app.native_queue.len();
+          let queue_len = $queue_len;
           let repeat = $app.decoded_repeat;
-          let advance = $app.$playback.as_ref().map(|s| {
+          let advance = $get.map(|s| {
             plan::decoded_advance(
               s.player.is_finished(),
               s.advancing,
@@ -634,7 +669,7 @@ impl Driver {
           });
           match advance {
             Some(plan::DecodedAdvance::Dispatch { replay }) => {
-              if let Some(s) = $app.$playback.as_mut() {
+              if let Some(s) = $get_mut {
                 s.advancing = true; // atomic check-and-set: one dispatch only
               }
               $app.dispatch(if replay {
@@ -652,7 +687,7 @@ impl Driver {
               $app.dispatch(IoEvent::AdvanceNativeQueue);
             }
             Some(plan::DecodedAdvance::Teardown) => {
-              $app.$playback = None;
+              $clear;
               $app.release_decoded_sink_claim();
             }
             Some(plan::DecodedAdvance::None) | None => {}
@@ -666,6 +701,17 @@ impl Driver {
     decoded_auto_advance!(app, subsonic_playback, tracks);
     #[cfg(feature = "qobuz")]
     decoded_auto_advance!(app, qobuz_playback, tracks);
+    // Until the native queue can suspend a Tidal session, Tidal plays its own
+    // list through and leaves queued items for after it.
+    #[cfg(feature = "tidal")]
+    decoded_auto_advance!(
+      app,
+      tracks,
+      get: app.tidal_playback(),
+      get_mut: app.tidal_playback_mut(),
+      clear: app.set_tidal_playback(None),
+      queue_len: 0
+    );
     #[cfg(feature = "youtube")]
     decoded_auto_advance!(app, youtube_playback, tracks);
 
@@ -732,6 +778,13 @@ impl Driver {
       if let Some(qobuz) = app.qobuz_playback.as_ref() {
         source_owns_playback = true;
         app.song_progress_ms = qobuz.player.position().as_millis();
+      }
+    }
+    #[cfg(feature = "tidal")]
+    if !spotify_queue_slot {
+      if let Some(tidal) = app.tidal_playback() {
+        source_owns_playback = true;
+        app.song_progress_ms = tidal.player.position().as_millis();
       }
     }
     #[cfg(feature = "internet-radio")]

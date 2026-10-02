@@ -1,11 +1,26 @@
-//! Tidal browse/search/login routing.
+//! Tidal browse/search/login/playback routing.
 //!
 //! The seam that keeps the Spotify [`Network`](crate::infra::network)
 //! Spotify-only: [`route_tidal_event`] is called from the runtime IoEvent pump
 //! after the Qobuz dispatch and before Radio. An event that targets the Tidal
-//! source (a browse, search or login request) is handled here and consumed;
-//! anything else falls through. Playback is not wired up yet: the pump's
-//! claim gate drops a `tidal:` start before any router sees it.
+//! source (a browse, search or login request, or a `tidal:` playback URI) is
+//! handled here and consumed; anything else falls through.
+//!
+//! ## Playback
+//!
+//! Tidal playback owns the private `App::tidal_playback` session and never
+//! writes Spotify or librespot fields. A track plays while it downloads
+//! (`super::stream`): the session is published at once, marked `advancing`,
+//! and a detached task asks for the manifest, opens the CDN download and
+//! builds the decoder, which waits for the first bytes. A skip during that
+//! window supersedes it through `fetch_id`; the superseded reader is dropped,
+//! which cancels its download. Repeat-one replays the tempfile only when the
+//! download completed (a forward seek can leave a gap that was never filled);
+//! otherwise it fetches the track again.
+//!
+//! The native queue cannot suspend a Tidal session yet
+//! (`App::tidal_ignores_native_queue`): a Tidal list plays through, and
+//! queued items wait until it ends.
 //!
 //! ## Browsing
 //!
@@ -22,21 +37,41 @@
 //! serving other events. Failures are status messages, never `handle_error`:
 //! the CLI never reaches this router, so no exit signal is lost.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
+use anyhow::{Context, Result};
+use tempfile::NamedTempFile;
 use tokio::sync::Mutex;
 
 use super::auth::{self, ClientCredentials, DeviceLogin};
-use super::TidalSource;
+use super::manifest::Delivered;
+use super::{track_id_from_uri, ResumePoint, TidalPlaybackState, TidalSource};
 use crate::core::app::{App, TrackTableContext};
-use crate::core::source::{MediaSource, Searcher};
+use crate::core::source::{MediaSource, Searcher, Source};
+use crate::core::state::PersistedRuntimeState;
+use crate::infra::audio::{LocalPlayer, PreparedStream};
 use crate::infra::network::IoEvent;
+use crate::infra::progressive::Completion;
+use crate::infra::queue::{advance_index, replay_file, snapshot_tracks};
 
 /// How long the login URL stays in the status bar: the device code's lifetime.
 const LOGIN_URL_TTL_SECS: u64 = 300;
 
 const LOGIN_EXPIRED: &str = "Tidal: login expired, press `d` and pick Tidal to log in again";
+
+/// Whether a URI is owned by the Tidal source.
+pub fn is_tidal_uri(uri: &str) -> bool {
+  uri.starts_with("tidal:")
+}
+
+/// Skip direction within the queue.
+#[derive(Clone, Copy)]
+enum Direction {
+  Next,
+  Prev,
+}
 
 /// Intercept events that target the Tidal source.
 ///
@@ -60,6 +95,64 @@ pub async fn route_tidal_event(app: &Arc<Mutex<App>>, event: &IoEvent) -> bool {
       begin_login(app).await;
       true
     }
+    // Start a list of Tidal tracks: queue all and start at the offset.
+    IoEvent::StartPlayback(None, Some(uris), offset)
+      if uris.first().is_some_and(|u| is_tidal_uri(u)) =>
+    {
+      start_tidal_queue(app, uris, offset.unwrap_or(0)).await;
+      true
+    }
+    // A single Tidal track with no surrounding list: a one-track queue.
+    IoEvent::StartPlayback(Some(uri), _, _) if is_tidal_uri(uri) => {
+      start_tidal_queue(app, std::slice::from_ref(uri), 0).await;
+      true
+    }
+    // Bare "resume current": ours only while Tidal owns the session.
+    IoEvent::StartPlayback(None, None, None) => match player(app).await {
+      Some(p) => {
+        p.resume();
+        true
+      }
+      None => false,
+    },
+    // Any other start is a foreign play: relinquish the device, then let the
+    // normal dispatch run.
+    IoEvent::StartPlayback(..) => {
+      teardown_tidal(app).await;
+      false
+    }
+    IoEvent::PausePlayback => match player(app).await {
+      Some(p) => {
+        p.pause();
+        true
+      }
+      None => false,
+    },
+    IoEvent::Seek(position_ms) => match player(app).await {
+      Some(p) => {
+        // A seek past the downloaded part waits for a range request: off the pump.
+        let position = Duration::from_millis(*position_ms as u64);
+        tokio::task::spawn_blocking(move || {
+          let _ = p.seek(position);
+        });
+        true
+      }
+      None => false,
+    },
+    IoEvent::ChangeVolume(volume) => match player(app).await {
+      Some(p) => {
+        p.set_volume(*volume);
+        let mut app = app.lock().await;
+        app.runtime_state.volume_percent = *volume;
+        app.schedule_state_save(PersistedRuntimeState::volume_percent(*volume));
+        true
+      }
+      None => false,
+    },
+    IoEvent::NextTrack => skip(app, Direction::Next).await,
+    IoEvent::PreviousTrack | IoEvent::ForcePreviousTrack => skip(app, Direction::Prev).await,
+    IoEvent::ReplayCurrentTrack => replay_current(app).await,
+    IoEvent::Repeat(state) => app.lock().await.set_decoded_repeat_from_state(*state),
     _ => false,
   }
 }
@@ -75,7 +168,11 @@ async fn set_status(app: &Arc<Mutex<App>>, message: impl Into<String>, ttl_secs:
 /// Report a failed call as one status message; a refused login is also
 /// cleared, so the next browse runs the login again.
 async fn report(app: &Arc<Mutex<App>>, step: &str, err: anyhow::Error) {
-  let mut app = app.lock().await;
+  let mut guard = app.lock().await;
+  report_locked(&mut guard, step, err);
+}
+
+fn report_locked(app: &mut App, step: &str, err: anyhow::Error) {
   if auth::needs_login(&err) {
     log::info!("[tidal] {step}: {err}");
     super::set_login(None);
@@ -86,10 +183,23 @@ async fn report(app: &Arc<Mutex<App>>, step: &str, err: anyhow::Error) {
   }
 }
 
+/// What to do when only a new login can help.
+#[derive(Clone, Copy)]
+enum WhenLoggedOut {
+  /// Browse paths start the device login.
+  Login,
+  /// Playback paths only show the login message.
+  Message,
+}
+
 /// A source for the current login: the in-memory one, else the saved one
-/// restored silently. When only the user can help, `TidalLogin` is
-/// dispatched (its success reloads the sidebar) and `None` returned.
-async fn build_source(app: &Arc<Mutex<App>>) -> Option<TidalSource> {
+/// restored silently. When only the user can help, the logged-out case is
+/// handled as `when_logged_out` says and `None` returned; a dispatched
+/// `TidalLogin` reloads the sidebar on success.
+async fn build_source(
+  app: &Arc<Mutex<App>>,
+  when_logged_out: WhenLoggedOut,
+) -> Option<TidalSource> {
   let client = auth::client_credentials(&app.lock().await.user_config.behavior);
   let Some(client) = client else {
     set_status(app, auth::NO_CLIENT_ID, 10).await;
@@ -101,8 +211,13 @@ async fn build_source(app: &Arc<Mutex<App>>) -> Option<TidalSource> {
   match super::restore_login(client).await {
     Ok(login) => Some(TidalSource::new(login)),
     Err(e) if auth::needs_login(&e) => {
-      log::info!("[tidal] {e}; asking for a login");
-      app.lock().await.dispatch(IoEvent::TidalLogin);
+      match when_logged_out {
+        WhenLoggedOut::Login => {
+          log::info!("[tidal] {e}; asking for a login");
+          app.lock().await.dispatch(IoEvent::TidalLogin);
+        }
+        WhenLoggedOut::Message => report(app, "login", e).await,
+      }
       None
     }
     Err(e) => {
@@ -118,7 +233,7 @@ async fn build_source(app: &Arc<Mutex<App>>) -> Option<TidalSource> {
 
 /// Fetch the sidebar rows (favorites, playlists, albums) into `app.tidal_playlists()`.
 async fn load_tidal_playlists(app: &Arc<Mutex<App>>) {
-  let Some(source) = build_source(app).await else {
+  let Some(source) = build_source(app, WhenLoggedOut::Login).await else {
     return;
   };
   match source.playlists().await {
@@ -130,7 +245,7 @@ async fn load_tidal_playlists(app: &Arc<Mutex<App>>) {
 /// Fetch a listing's tracks into the shared track table, tagged
 /// [`TrackTableContext::TidalPlaylist`].
 async fn load_tidal_tracks(app: &Arc<Mutex<App>>, playlist_uri: &str) {
-  let Some(source) = build_source(app).await else {
+  let Some(source) = build_source(app, WhenLoggedOut::Login).await else {
     return;
   };
   match source.tracks(playlist_uri).await {
@@ -147,7 +262,7 @@ async fn load_tidal_tracks(app: &Arc<Mutex<App>>, playlist_uri: &str) {
 
 /// Run a catalog search and populate the songs block of `app.search_results`.
 async fn run_tidal_search(app: &Arc<Mutex<App>>, query: &str) {
-  let Some(source) = build_source(app).await else {
+  let Some(source) = build_source(app, WhenLoggedOut::Login).await else {
     return;
   };
   match source.search(query).await {
@@ -156,6 +271,425 @@ async fn run_tidal_search(app: &Arc<Mutex<App>>, query: &str) {
       .await
       .show_source_search_tracks(query, results.tracks),
     Err(e) => report(app, "search", e).await,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Playback
+// ---------------------------------------------------------------------------
+
+/// The live Tidal player, if a Tidal session is active.
+async fn player(app: &Arc<Mutex<App>>) -> Option<Arc<LocalPlayer>> {
+  app
+    .lock()
+    .await
+    .tidal_playback()
+    .map(|s| Arc::clone(&s.player))
+}
+
+/// Release every other backend so only Tidal holds the output device.
+async fn release_other_backends(app: &Arc<Mutex<App>>) {
+  // Take the sink from native Spotify so no rebuild resumes it under this
+  // source.
+  #[cfg(feature = "streaming")]
+  app.lock().await.release_native_for_decoded();
+  // The other decoded sources never see this `tidal:` start (the pump
+  // short-circuits), so their sessions are torn down here.
+  let players = app.lock().await.take_decoded_sessions_except(Source::Tidal);
+  for player in players {
+    player.stop_detached();
+  }
+}
+
+/// Reuse the live Tidal player, or open a fresh output device for one. A
+/// freshly opened player is **not** published to `App` here.
+async fn acquire_player(app: &Arc<Mutex<App>>) -> Option<Arc<LocalPlayer>> {
+  if let Some(p) = player(app).await {
+    return Some(p);
+  }
+  match tokio::task::spawn_blocking(LocalPlayer::new).await {
+    Ok(Ok(p)) => Some(Arc::new(p)),
+    Ok(Err(e)) => {
+      set_status(app, format!("No audio output for Tidal playback: {e}"), 6).await;
+      None
+    }
+    Err(e) => {
+      set_status(app, format!("Audio output init failed: {e}"), 6).await;
+      None
+    }
+  }
+}
+
+static FETCH_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn next_fetch_id() -> u64 {
+  FETCH_SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
+/// A track whose download runs and whose decoder is built.
+struct PreparedTrack {
+  tempfile: NamedTempFile,
+  complete: Completion,
+  delivered: Delivered,
+  stream: PreparedStream,
+}
+
+/// Ask for the track's manifest, open its download into a fresh tempfile and
+/// build its decoder, whose first read waits for the prefetch.
+async fn prepare_track(source: &TidalSource, track_id: &str) -> Result<PreparedTrack> {
+  let stream_source = source.stream_source(track_id).await?;
+  let tempfile = NamedTempFile::new().context("creating temp file for Tidal stream")?;
+  let opened = super::stream::open(&stream_source.url, &tempfile).await?;
+  let mime = stream_source.mime_type;
+  let byte_len = opened.byte_len;
+  let reader = opened.reader;
+  let stream = tokio::task::spawn_blocking(move || {
+    LocalPlayer::prepare_stream(reader, mime.as_deref(), byte_len)
+  })
+  .await
+  .context("decoder task")??;
+  log::info!(
+    "[tidal] track {track_id} delivered {}",
+    stream_source.delivered.label()
+  );
+  Ok(PreparedTrack {
+    tempfile,
+    complete: opened.completion,
+    delivered: stream_source.delivered,
+    stream,
+  })
+}
+
+/// Fetch the track on a detached task, then play it when the session still
+/// waits for this fetch. Called under the `App` lock that stamped
+/// `session.fetch_id`, so the abort handle is in place before any skip looks
+/// for it: a skip, a new queue or a teardown cancels the task, and a decoder
+/// build already in progress ends on its own and drops its reader, which
+/// cancels that download.
+fn spawn_fetch(app: &Arc<Mutex<App>>, session: &mut TidalPlaybackState, track_id: String) {
+  let app = Arc::clone(app);
+  let source = Arc::clone(&session.source);
+  let fetch_id = session.fetch_id;
+  let task = tokio::spawn(async move {
+    match prepare_track(&source, &track_id).await {
+      Ok(prepared) => commit_fetch(&app, fetch_id, prepared).await,
+      Err(e) => fail_fetch(&app, fetch_id, "stream", e).await,
+    }
+  });
+  session.fetch = Some(task.abort_handle());
+}
+
+/// A failed fetch: tear the session down only if it still waits for this
+/// fetch, and report the error. A teardown rather than a skip: a skip would
+/// walk the list at tick speed when every track fails the same way.
+async fn fail_fetch(app: &Arc<Mutex<App>>, fetch_id: u64, step: &str, err: anyhow::Error) {
+  let mut guard = app.lock().await;
+  if guard
+    .tidal_playback()
+    .is_none_or(|s| s.fetch_id != fetch_id)
+  {
+    return;
+  }
+  let session = guard.set_tidal_playback(None);
+  report_locked(&mut guard, step, err);
+  drop(guard);
+  if let Some(s) = session {
+    Arc::clone(&s.player).stop_detached();
+  }
+}
+
+/// Play the prepared stream and finalize the session. The previous track is
+/// cleared off the `App` lock first (the sink clear waits for the audio
+/// thread, which a stalled stream holds), then the session is checked again
+/// under the lock so a concurrent skip (which restamps `fetch_id`) cannot
+/// interleave. A stale stream is dropped, which cancels its download.
+async fn commit_fetch(app: &Arc<Mutex<App>>, fetch_id: u64, prepared: PreparedTrack) {
+  let claimed = {
+    let guard = app.lock().await;
+    guard
+      .tidal_playback()
+      .filter(|s| s.fetch_id == fetch_id)
+      // A pause pressed during the fetch window applies to the previous
+      // track's sink; a fresh player starts paused, so only a session that
+      // already played something counts.
+      .map(|s| {
+        (
+          Arc::clone(&s.player),
+          s.tempfile.is_some() && s.player.is_paused(),
+        )
+      })
+  };
+  let Some((player, was_paused)) = claimed else {
+    return;
+  };
+  let stop_player = Arc::clone(&player);
+  if tokio::task::spawn_blocking(move || stop_player.stop())
+    .await
+    .is_err()
+  {
+    return;
+  }
+  let PreparedTrack {
+    tempfile,
+    complete,
+    delivered,
+    stream,
+  } = prepared;
+  // Claim the session under the lock, stage off it: the clear inside
+  // `stage_prepared` waits on the audio thread, and the runner takes this
+  // lock on every frame.
+  let (resume, volume) = {
+    let mut guard = app.lock().await;
+    let volume = guard.runtime_state.volume_percent;
+    let Some(s) = guard
+      .tidal_playback_mut()
+      .filter(|s| s.fetch_id == fetch_id)
+    else {
+      return;
+    };
+    s.tempfile = Some(tempfile);
+    s.complete = Some(complete);
+    s.quality = Some(delivered);
+    s.fetch = None;
+    (s.resume_at.take(), volume)
+  };
+  let paused = was_paused || resume.is_some_and(|r| r.paused);
+  let stage_player = Arc::clone(&player);
+  let staged = tokio::task::spawn_blocking(move || {
+    stage_player.stage_prepared(stream)?;
+    stage_player.set_volume(volume);
+    if !paused {
+      stage_player.resume();
+    }
+    Ok::<(), anyhow::Error>(())
+  })
+  .await;
+  let staged = match staged {
+    Ok(Ok(())) => true,
+    Ok(Err(e)) => {
+      log::warn!("[tidal] stage: {e:#}");
+      false
+    }
+    Err(e) => {
+      log::warn!("[tidal] stage task: {e}");
+      false
+    }
+  };
+  let mut guard = app.lock().await;
+  let Some(s) = guard
+    .tidal_playback_mut()
+    .filter(|s| s.fetch_id == fetch_id)
+  else {
+    return;
+  };
+  if !staged {
+    // The device went under the stage. Replay instead, with the same pause;
+    // the advance latch stays on until it does.
+    s.resume_at = Some(ResumePoint {
+      position_ms: resume.map_or(0, |r| r.position_ms),
+      paused,
+    });
+    guard.dispatch(IoEvent::ReplayCurrentTrack);
+    return;
+  }
+  s.advancing = false;
+  let display = s.current().map(|t| t.name.clone());
+  if let Some(display) = display {
+    guard.set_status_message(format!("\u{266a} {display}"), 4);
+  }
+  drop(guard);
+  // The restore seek waits for that part of the download: off the App lock.
+  if let Some(position_ms) = resume.map(|r| r.position_ms).filter(|&ms| ms > 0) {
+    tokio::task::spawn_blocking(move || {
+      let _ = player.seek(Duration::from_millis(position_ms));
+    });
+  }
+}
+
+/// Begin playing a list of Tidal tracks, taking over the session and starting
+/// at `start_idx` (clamped into range).
+async fn start_tidal_queue(app: &Arc<Mutex<App>>, uris: &[String], start_idx: usize) {
+  let tracks = {
+    let guard = app.lock().await;
+    let search = guard
+      .search_results()
+      .tracks
+      .as_ref()
+      .map(|p| p.items.as_slice());
+    snapshot_tracks(&guard.track_table.tracks, search, uris)
+  };
+  if tracks.is_empty() {
+    set_status(app, "No Tidal tracks to play", 6).await;
+    return;
+  }
+  let index = start_idx.min(tracks.len() - 1);
+  let track_id = match tracks[index].uri.as_deref().map(track_id_from_uri) {
+    Some(Ok(id)) => id.to_string(),
+    _ => {
+      set_status(app, "Invalid Tidal track URI", 6).await;
+      return;
+    }
+  };
+  let Some(source) = build_source(app, WhenLoggedOut::Message).await else {
+    return;
+  };
+  let source = Arc::new(source);
+
+  // Only one backend owns the device at a time.
+  app.lock().await.claim_decoded_sink(Source::Tidal);
+  release_other_backends(app).await;
+  let Some(player) = acquire_player(app).await else {
+    return;
+  };
+
+  // Publish the session now, marked advancing, so the playbar and the skip
+  // keys see it during the download; `commit_fetch` finalizes it.
+  let mut guard = app.lock().await;
+  let mut state = TidalPlaybackState {
+    player,
+    source,
+    tracks,
+    index,
+    advancing: true,
+    tempfile: None,
+    complete: None,
+    quality: None,
+    shuffle_backup: None,
+    fetch_id: next_fetch_id(),
+    resume_at: None,
+    fetch: None,
+  };
+  // Honor the player-global decoded shuffle for the freshly built queue.
+  if guard.decoded_shuffle {
+    state.set_shuffle(true);
+  }
+  spawn_fetch(app, &mut state, track_id);
+  // Dropping a previous session aborts its download.
+  guard.set_tidal_playback(Some(state));
+}
+
+/// Move the queue index in `direction` and play the new track. Returns `true`
+/// if Tidal owns the session (so the event is consumed).
+async fn skip(app: &Arc<Mutex<App>>, direction: Direction) -> bool {
+  let target = {
+    let mut guard = app.lock().await;
+    let mode = guard.decoded_repeat;
+    let Some(s) = guard.tidal_playback_mut() else {
+      return false;
+    };
+    s.advancing = true;
+    let forward = matches!(direction, Direction::Next);
+    advance_index(s.index, s.tracks.len(), mode, forward)
+  };
+  match target {
+    Some(idx) => play_index(app, idx, None).await,
+    None => {
+      // Queue boundary: clear the guard so auto-advance is not wedged off. A
+      // pending first download keeps it (the sink is still empty).
+      if let Some(s) = app.lock().await.tidal_playback_mut() {
+        if s.tempfile.is_some() {
+          s.advancing = false;
+        }
+      }
+    }
+  }
+  true
+}
+
+/// How a replay of the current track proceeds.
+enum Replay {
+  /// The file is whole: restage it, with no second download.
+  File(Arc<LocalPlayer>, std::path::PathBuf, Option<ResumePoint>),
+  /// The file has a gap (or its download stopped early): fetch it again.
+  Fetch(usize, ResumePoint),
+  /// Still downloading: the commit applies `resume_at` and starts playback.
+  Pending,
+}
+
+/// Replay the current track (repeat-one, device recovery). Returns `true` if
+/// Tidal owns the session.
+async fn replay_current(app: &Arc<Mutex<App>>) -> bool {
+  let replay = {
+    let mut guard = app.lock().await;
+    let Some(s) = guard.tidal_playback_mut() else {
+      return false;
+    };
+    s.advancing = true;
+    if s.tempfile.is_none() {
+      Replay::Pending
+    } else {
+      let resume = s.resume_at.take().unwrap_or(ResumePoint {
+        position_ms: 0,
+        paused: s.player.is_paused(),
+      });
+      match s.tempfile.as_ref() {
+        Some(t) if s.file_is_complete() => {
+          Replay::File(Arc::clone(&s.player), t.path().to_path_buf(), Some(resume))
+        }
+        _ => Replay::Fetch(s.index, resume),
+      }
+    }
+  };
+  match replay {
+    Replay::File(player, path, resume) => {
+      if replay_file(player, path, resume).await {
+        if let Some(s) = app.lock().await.tidal_playback_mut() {
+          s.advancing = false;
+        }
+      } else {
+        teardown_tidal(app).await;
+        set_status(app, "Cannot replay Tidal track", 6).await;
+      }
+    }
+    Replay::Fetch(index, resume) => play_index(app, index, Some(resume)).await,
+    Replay::Pending => {}
+  }
+  true
+}
+
+/// Play the queued track at `target` in the published session: the index moves
+/// at once and the download runs off the pump. Used by Next/Previous, the tick's
+/// auto-advance, and a replay that fetches again, which passes how the track
+/// starts as `resume`.
+async fn play_index(app: &Arc<Mutex<App>>, target: usize, resume: Option<ResumePoint>) {
+  let mut guard = app.lock().await;
+  let Some(s) = guard.tidal_playback_mut() else {
+    return; // session torn down between dispatch and here
+  };
+  let Some(track) = s.tracks.get(target) else {
+    s.advancing = false;
+    return;
+  };
+  let track_id = match track.uri.as_deref().map(track_id_from_uri) {
+    Some(Ok(id)) => id.to_string(),
+    _ => {
+      drop(guard);
+      teardown_tidal(app).await;
+      set_status(app, "Invalid Tidal track URI", 6).await;
+      return;
+    }
+  };
+  // Cancel a superseded download; the file, format and restore point of the
+  // previous track go with it, so the session never describes two tracks.
+  if let Some(fetch) = s.fetch.take() {
+    fetch.abort();
+  }
+  s.tempfile = None;
+  s.complete = None;
+  s.quality = None;
+  s.resume_at = resume;
+  s.index = target;
+  s.advancing = true;
+  s.fetch_id = next_fetch_id();
+  spawn_fetch(app, s, track_id);
+}
+
+/// End the Tidal session, releasing the output device and the tempfile. The
+/// player stops off the `App` lock.
+async fn teardown_tidal(app: &Arc<Mutex<App>>) {
+  let session = app.lock().await.set_tidal_playback(None);
+  if let Some(s) = session {
+    Arc::clone(&s.player).stop_detached_holding(s);
   }
 }
 

@@ -457,6 +457,17 @@ fn context_preview_lines(app: &App, max: usize) -> Vec<String> {
       }
       #[cfg(feature = "internet-radio")]
       SuspendedContext::Radio { station } => vec![format!("Resumes: {}", station.name)],
+      // A build whose only queueable source has no suspended context yet
+      // (Tidal alone) leaves the enum empty.
+      #[cfg(not(any(
+        feature = "streaming",
+        feature = "local-files",
+        feature = "subsonic",
+        feature = "qobuz",
+        feature = "youtube",
+        feature = "internet-radio"
+      )))]
+      _ => Vec::new(),
     };
   }
 

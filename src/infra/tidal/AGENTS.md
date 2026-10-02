@@ -18,4 +18,23 @@
   A browse uses the in-memory login, else restores the saved one inline, else
   dispatches `TidalLogin`, whose success reloads the sidebar. Ids go into
   request paths unescaped, so `listing_from_uri` admits only uuid characters.
-  Until playback lands, the pump's claim gate drops `tidal:` starts.
+- Playback (`dispatch.rs`, after Qobuz's) asks `playbackinfopostpaywall` for
+  HIGH and decodes the BTS manifest (`manifest.rs`, pure): one direct,
+  unencrypted CDN URL, AAC in MP4. A DASH (hi-res) manifest is an error for
+  now. The track plays while it downloads: `stream.rs` runs a
+  `stream-download` `HttpStream` (Range requests on seek) into the session's
+  tempfile through the shared `infra/progressive.rs`. That client has a read
+  timeout but no request timeout, which would cut tracks off; it is
+  `stream-download`'s own `reqwest`, which can differ from the crate's. Errors
+  never print the URL: its query carries the CDN token.
+- The session lives in the **private** `App::tidal_playback` (accessors in
+  `core/app/playback_routing.rs`; `pub_fields_on_app` may only fall), so the
+  driver's `decoded_device_recovery!` / `decoded_auto_advance!` use their
+  accessor arm. Repeat-one replays the tempfile only when `progressive`'s
+  `Completion` says every byte arrived (`stream-download` back-fills a
+  forward seek's gap at the end, unless the reader was dropped first);
+  otherwise it fetches the track again.
+- Not queueable yet: `add_track_to_native_queue` refuses `tidal:` URIs, and
+  `App::tidal_ignores_native_queue` keeps the native queue from suspending a
+  Tidal session (it has no `SuspendedContext` arm), so a Tidal list plays
+  through and queued items wait until it ends.

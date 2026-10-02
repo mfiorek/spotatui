@@ -172,7 +172,7 @@ fn reopen_due(attempts: u8, since_last: Option<Duration>) -> bool {
 }
 
 /// A decoded stream, ready for [`LocalPlayer::play_prepared`].
-#[cfg(any(feature = "internet-radio", feature = "qobuz"))]
+#[cfg(any(feature = "internet-radio", feature = "qobuz", feature = "tidal"))]
 pub struct PreparedStream(Box<dyn rodio::Source + Send>);
 
 impl LocalPlayer {
@@ -433,7 +433,12 @@ impl LocalPlayer {
   /// queued and the sink left paused, so a caller that must seek first, or
   /// stay paused, never plays a burst of the track's start.
   #[cfg_attr(
-    not(any(feature = "local-files", feature = "subsonic", feature = "qobuz")),
+    not(any(
+      feature = "local-files",
+      feature = "subsonic",
+      feature = "qobuz",
+      feature = "tidal"
+    )),
     allow(dead_code)
   )]
   pub fn stage_file(&self, path: &Path) -> Result<()> {
@@ -473,7 +478,7 @@ impl LocalPlayer {
   ///
   /// **Blocking:** the probe reads from the network reader; call it off the
   /// async runtime (e.g. `spawn_blocking`) like `play_file`.
-  #[cfg(any(feature = "internet-radio", feature = "qobuz"))]
+  #[cfg(any(feature = "internet-radio", feature = "qobuz", feature = "tidal"))]
   pub fn prepare_stream<R>(
     reader: R,
     mime_type: Option<&str>,
@@ -500,7 +505,7 @@ impl LocalPlayer {
   /// Play a prepared stream, replacing whatever was playing. The clear waits
   /// for the audio thread to drop the previous source: call it off the `App`
   /// lock (see `stop_detached`). Fails once the device is gone.
-  #[cfg(any(feature = "internet-radio", feature = "qobuz"))]
+  #[cfg(any(feature = "internet-radio", feature = "qobuz", feature = "tidal"))]
   #[cfg_attr(not(feature = "internet-radio"), allow(dead_code))]
   pub fn play_prepared(&self, stream: PreparedStream) -> Result<()> {
     self.stage_prepared(stream)?;
@@ -510,7 +515,7 @@ impl LocalPlayer {
 
   /// [`play_prepared`](Self::play_prepared) without the final play, like
   /// [`stage_file`](Self::stage_file).
-  #[cfg(any(feature = "internet-radio", feature = "qobuz"))]
+  #[cfg(any(feature = "internet-radio", feature = "qobuz", feature = "tidal"))]
   pub fn stage_prepared(&self, stream: PreparedStream) -> Result<()> {
     let stage = self.begin_stage();
     let sink = self.live_player()?;
@@ -577,7 +582,12 @@ impl LocalPlayer {
   /// Radio never polls this (an infinite stream has no end-of-track), so it is
   /// dead code in a build with just `internet-radio`.
   #[cfg_attr(
-    not(any(feature = "local-files", feature = "subsonic", feature = "qobuz")),
+    not(any(
+      feature = "local-files",
+      feature = "subsonic",
+      feature = "qobuz",
+      feature = "tidal"
+    )),
     allow(dead_code)
   )]
   pub fn is_finished(&self) -> bool {
@@ -589,7 +599,12 @@ impl LocalPlayer {
   /// Radio consumes `Seek` as a no-op (nothing to seek within a live stream),
   /// so this is dead code in a build with just `internet-radio`.
   #[cfg_attr(
-    not(any(feature = "local-files", feature = "subsonic", feature = "qobuz")),
+    not(any(
+      feature = "local-files",
+      feature = "subsonic",
+      feature = "qobuz",
+      feature = "tidal"
+    )),
     allow(dead_code)
   )]
   pub fn seek(&self, pos: Duration) -> Result<()> {

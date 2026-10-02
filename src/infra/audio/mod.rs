@@ -7,12 +7,12 @@
 // any source that plays through the local rodio sink (local files, Subsonic, Qobuz).
 
 // Shared decode/output engine. Gated on `audio-decode`, which `local-files`,
-// `subsonic` and `qobuz` pull in, so the player is reachable from each source.
+// `subsonic`, `qobuz` and `tidal` pull in, so the player is reachable from each source.
 #[cfg(feature = "audio-decode")]
 mod player;
 #[cfg(feature = "audio-decode")]
 pub use player::LocalPlayer;
-#[cfg(feature = "qobuz")]
+#[cfg(any(feature = "qobuz", feature = "tidal"))]
 pub use player::PreparedStream;
 #[cfg(feature = "audio-decode-queue")]
 pub use player::Reopen;

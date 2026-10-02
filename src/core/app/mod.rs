@@ -513,6 +513,12 @@ pub struct App {
   /// playback. Same decoupling contract as [`local_playback`](Self::local_playback).
   #[cfg(feature = "qobuz")]
   pub qobuz_playback: Option<crate::infra::qobuz::QobuzPlaybackState>,
+  /// The active Tidal playback session, or `None` when another backend owns
+  /// playback. Same decoupling contract as [`local_playback`](Self::local_playback).
+  /// Private: read through `tidal_playback()`, written by `infra::tidal`
+  /// through `tidal_playback_mut()` / `set_tidal_playback()`.
+  #[cfg(feature = "tidal")]
+  tidal_playback: Option<crate::infra::tidal::TidalPlaybackState>,
   /// The active internet-radio playback session (multi-source Phase 5), or
   /// `None` when another backend owns playback. Same decoupling contract as
   /// [`local_playback`](Self::local_playback); unlike it there is no queue —

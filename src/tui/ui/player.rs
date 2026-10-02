@@ -567,6 +567,11 @@ fn non_spotify_source_playback_active(app: &App) -> bool {
     return true;
   }
 
+  #[cfg(feature = "tidal")]
+  if app.tidal_playback().is_some() {
+    return true;
+  }
+
   #[cfg(feature = "internet-radio")]
   if app.radio_playback.is_some() {
     return true;
@@ -939,6 +944,35 @@ fn draw_qobuz_playbar(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
   render_local_playbar(f, app, layout_chunk, &view);
 }
 
+/// Render the playbar for an active Tidal playback session; the delivered
+/// format shows as the quality label, so the AAC fallback stays visible.
+#[cfg(feature = "tidal")]
+fn draw_tidal_playbar(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
+  let Some(tidal) = app.tidal_playback() else {
+    return;
+  };
+  let track = tidal.current();
+  let name = track.map(|t| t.name.clone()).unwrap_or_default();
+  let view = LocalPlaybarView {
+    source_label: "Tidal",
+    name: if tidal.advancing {
+      format!("{name} (loading\u{2026})")
+    } else {
+      name
+    },
+    artists: track.map(|t| t.artists.join(", ")).unwrap_or_default(),
+    is_playing: !tidal.player.is_paused(),
+    position_ms: tidal.player.position().as_millis(),
+    duration_ms: track.map(|t| t.duration_ms).unwrap_or(0),
+    volume_percent: app.runtime_state.volume_percent,
+    queue_position: (tidal.tracks.len() > 1).then(|| (tidal.index + 1, tidal.tracks.len())),
+    live: false,
+    show_modes: true,
+    quality: tidal.quality.as_ref().map(|q| q.label()),
+  };
+  render_local_playbar(f, app, layout_chunk, &view);
+}
+
 /// Render the playbar for an active YouTube playback session, reading
 /// progress/pause live from the player just like the Subsonic path.
 #[cfg(feature = "youtube")]
@@ -1239,6 +1273,13 @@ pub fn draw_playbar(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
   #[cfg(feature = "qobuz")]
   if app.qobuz_playback.is_some() {
     draw_qobuz_playbar(f, app, layout_chunk);
+    return;
+  }
+
+  // Tidal playback likewise renders from its own session state.
+  #[cfg(feature = "tidal")]
+  if app.tidal_playback().is_some() {
+    draw_tidal_playbar(f, app, layout_chunk);
     return;
   }
 

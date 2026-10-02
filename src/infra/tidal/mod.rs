@@ -14,6 +14,8 @@
 pub mod auth;
 pub mod client;
 pub mod dispatch;
+pub mod manifest;
+pub mod stream;
 mod types;
 
 use std::sync::Arc;
@@ -25,8 +27,73 @@ use serde::de::{DeserializeOwned, IgnoredAny};
 
 use crate::core::plugin_api::{ArtistRef, PlaylistInfo, SearchResults, TrackInfo};
 use crate::core::source::{MediaSource, Searcher};
+use crate::infra::audio::LocalPlayer;
+use crate::infra::progressive::Completion;
 use auth::{ClientCredentials, DeviceLogin, TidalCredentials};
 use client::TidalClient;
+use manifest::{Delivered, PlaybackInfo, StreamSource};
+
+/// One Tidal playback session: the listing being played and the current
+/// track's download. Lives in the private `App::tidal_playback` field.
+pub struct TidalPlaybackState {
+  pub player: Arc<LocalPlayer>,
+  /// Source handle, reused to fetch each track on Next/advance.
+  pub source: Arc<TidalSource>,
+  /// The playing listing's tracks in order; the playbar reads `tracks[index]`.
+  pub tracks: Vec<TrackInfo>,
+  pub index: usize,
+  /// Set until the track starts to play so the tick never reads the empty
+  /// sink as end-of-track.
+  pub advancing: bool,
+  /// The current track's file, filled while it plays; `None` until playback
+  /// starts.
+  pub tempfile: Option<tempfile::NamedTempFile>,
+  /// Whether `tempfile` holds every byte; a replay reads it only then.
+  pub complete: Option<Completion>,
+  /// The delivered format of the current track; `None` until playback starts.
+  pub quality: Option<Delivered>,
+  /// Backup of the pre-shuffle order while shuffle is on.
+  pub shuffle_backup: Option<crate::infra::queue::ShuffleBackup>,
+  /// Stamp of the fetch in flight; a finished fetch with another stamp is dropped.
+  pub fetch_id: u64,
+  /// A seek and pause to apply when the next track is staged (device
+  /// recovery, a replay that fetches again).
+  pub resume_at: Option<ResumePoint>,
+  /// The fetch task in flight; aborted when the session is replaced or restamped.
+  pub fetch: Option<tokio::task::AbortHandle>,
+}
+
+impl Drop for TidalPlaybackState {
+  fn drop(&mut self) {
+    if let Some(fetch) = self.fetch.take() {
+      fetch.abort();
+    }
+  }
+}
+
+impl TidalPlaybackState {
+  /// The currently playing track, if `index` is in range.
+  pub fn current(&self) -> Option<&TrackInfo> {
+    self.tracks.get(self.index)
+  }
+
+  /// Whether the current track's file is whole, so a replay can read it.
+  pub fn file_is_complete(&self) -> bool {
+    self.tempfile.is_some() && self.complete.as_ref().is_some_and(Completion::is_complete)
+  }
+
+  /// Turn in-place shuffle on or off (see `infra::queue::toggle_shuffle`).
+  pub fn set_shuffle(&mut self, on: bool) {
+    crate::infra::queue::toggle_shuffle(
+      &mut self.tracks,
+      &mut self.index,
+      &mut self.shuffle_backup,
+      on,
+    );
+  }
+}
+
+pub use crate::infra::queue::ResumePoint;
 
 const TRACK_PREFIX: &str = "tidal:track:";
 const PLAYLIST_PREFIX: &str = "tidal:playlist:";
@@ -246,6 +313,20 @@ impl TidalSource {
   }
 }
 
+impl TidalSource {
+  /// Ask for a track's stream and decode its manifest.
+  pub async fn stream_source(&self, track_id: &str) -> Result<StreamSource> {
+    let info: PlaybackInfo = self
+      .client
+      .get_json(
+        &manifest::playback_info_path(track_id),
+        &manifest::playback_info_params(manifest::REQUESTED_QUALITY),
+      )
+      .await?;
+    manifest::stream_source(&info)
+  }
+}
+
 impl MediaSource for TidalSource {
   fn name(&self) -> &str {
     "Tidal"
@@ -309,6 +390,14 @@ impl Searcher for TidalSource {
 /// Ids go into the request path unescaped, so only uuid characters pass.
 fn is_path_safe(id: &str) -> bool {
   !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// The numeric id of a `tidal:track:<id>` URI.
+pub fn track_id_from_uri(uri: &str) -> Result<&str> {
+  uri
+    .strip_prefix(TRACK_PREFIX)
+    .filter(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()))
+    .ok_or_else(|| anyhow!("Not a tidal track URI: {uri}"))
 }
 
 fn listing_from_uri(uri: &str) -> Result<Listing> {
@@ -514,10 +603,100 @@ pub(crate) mod test_server {
     });
     (base, handle)
   }
+
+  /// A file server that honours `Range`, for the download tests.
+  pub struct FileServer {
+    ranges: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
+  }
+
+  impl FileServer {
+    /// The `Range` header of each request so far, in arrival order.
+    pub fn ranges(&self) -> Vec<Option<String>> {
+      self.ranges.lock().unwrap().clone()
+    }
+  }
+
+  /// Serve `body` at `<base>/track.m4a`, one connection per request, in 16 KiB
+  /// chunks with a pause between them so a download is still running when
+  /// the reader seeks. Request number `hang_from` and later get their headers
+  /// and then no body.
+  pub async fn serve_file(body: Vec<u8>, hang_from: Option<usize>) -> (String, FileServer) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/track.m4a", listener.local_addr().unwrap());
+    let ranges = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = std::sync::Arc::clone(&ranges);
+    let body = std::sync::Arc::new(body);
+    tokio::spawn(async move {
+      while let Ok((mut stream, _)) = listener.accept().await {
+        let body = std::sync::Arc::clone(&body);
+        let log = std::sync::Arc::clone(&log);
+        tokio::spawn(async move {
+          let (read_half, mut write_half) = stream.split();
+          let mut reader = BufReader::new(read_half);
+          let mut range = None;
+          loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).await.unwrap_or(0) == 0 || line == "\r\n" {
+              break;
+            }
+            if let Some((name, value)) = line.split_once(':') {
+              if name.eq_ignore_ascii_case("range") {
+                range = Some(value.trim().to_string());
+              }
+            }
+          }
+          let number = {
+            let mut log = log.lock().unwrap();
+            log.push(range.clone());
+            log.len() - 1
+          };
+          let total = body.len();
+          let (start, end) = range
+            .as_deref()
+            .and_then(|r| r.strip_prefix("bytes="))
+            .and_then(|r| r.split_once('-'))
+            .map(|(start, end)| {
+              let start: usize = start.parse().unwrap_or(0);
+              let end: usize = end.parse().map_or(total, |e: usize| e + 1);
+              (start.min(total), end.min(total))
+            })
+            .unwrap_or((0, total));
+          let head = if range.is_some() {
+            format!(
+              "HTTP/1.1 206 Partial Content\r\ncontent-type: audio/mp4\r\naccept-ranges: bytes\r\ncontent-range: bytes {start}-{}/{total}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+              end.saturating_sub(1),
+              end - start
+            )
+          } else {
+            format!(
+              "HTTP/1.1 200 OK\r\ncontent-type: audio/mp4\r\naccept-ranges: bytes\r\ncontent-length: {total}\r\nconnection: close\r\n\r\n"
+            )
+          };
+          if write_half.write_all(head.as_bytes()).await.is_err() {
+            return;
+          }
+          if hang_from.is_some_and(|n| number >= n) {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            return;
+          }
+          for chunk in body[start..end].chunks(16 * 1024) {
+            if write_half.write_all(chunk).await.is_err() {
+              return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+          }
+          let _ = write_half.flush().await;
+        });
+      }
+    });
+    (url, FileServer { ranges })
+  }
 }
 
 #[cfg(test)]
 mod tests {
+  use base64::Engine as _;
+
   use super::test_server::{serve, Reply};
   use super::*;
 
@@ -772,6 +951,40 @@ mod tests {
     );
   }
 
+  #[tokio::test]
+  async fn a_stream_is_asked_for_with_the_full_asset_and_decoded() {
+    let manifest = base64::engine::general_purpose::STANDARD
+      .encode(r#"{"mimeType":"audio/mp4","encryptionType":"NONE","urls":["https://cdn/t.m4a"]}"#);
+    let reply = format!(
+      r#"{{"audioQuality":"HIGH","manifestMimeType":"application/vnd.tidal.bts","manifest":"{manifest}"}}"#
+    );
+    let (base, server) = serve(vec![Reply::new("200 OK", reply)]).await;
+    let stream = source_at(&base).stream_source("77").await.unwrap();
+    assert_eq!(stream.url, "https://cdn/t.m4a");
+    assert_eq!(stream.delivered, Delivered::High);
+    let requests = server.await.unwrap();
+    assert!(
+      requests[0].starts_with(
+        "GET /v1/tracks/77/playbackinfopostpaywall?playbackmode=STREAM&audioquality=HIGH&assetpresentation=FULL&countryCode=NO"
+      ),
+      "{}",
+      requests[0]
+    );
+  }
+
+  #[test]
+  fn track_uris_admit_numeric_ids_only() {
+    assert_eq!(track_id_from_uri("tidal:track:123").unwrap(), "123");
+    for uri in [
+      "tidal:track:",
+      "tidal:track:1/2",
+      "tidal:album:1",
+      "qobuz:track:1",
+    ] {
+      assert!(track_id_from_uri(uri).is_err(), "{uri}");
+    }
+  }
+
   /// Browses the real library with the login the app saved. The client ID
   /// comes from `config.yml` or `SPOTATUI_TIDAL_CLIENT_ID`, as in the app; a
   /// rotated token is saved like the app does.
@@ -799,5 +1012,44 @@ mod tests {
     let results = source.search("Daft Punk").await.expect("search");
     let hit = results.tracks.first().expect("a search hit");
     println!("search: {} - {}", hit.name, hit.artists.join(", "));
+  }
+
+  /// Streams the first favorite track: the manifest, the CDN download into a
+  /// tempfile, and a decoder over it (which probes the container, so an MP4
+  /// with its `moov` at the end shows up here). No audio device needed.
+  ///
+  /// `cargo test --features tidal -- --ignored live_tidal_stream --nocapture`
+  #[tokio::test(flavor = "multi_thread")]
+  #[ignore = "needs a saved Tidal login, a client ID and the network"]
+  async fn live_tidal_stream() {
+    let mut config = crate::core::user_config::UserConfig::new();
+    config.load_config().expect("config.yml");
+    let client = auth::client_credentials(&config.behavior).expect("a Tidal client ID");
+    let source = TidalSource::new(restore_login(client).await.expect("a saved login"));
+
+    let tracks = source.tracks(FAVORITES_URI).await.expect("favorite tracks");
+    let track = tracks.first().expect("a favorite track");
+    let uri = track.uri.as_deref().expect("a track URI");
+    let stream = source
+      .stream_source(track_id_from_uri(uri).unwrap())
+      .await
+      .expect("a stream");
+    println!(
+      "{}: {} ({:?})",
+      track.name,
+      stream.delivered.label(),
+      stream.mime_type
+    );
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let opened = stream::open(&stream.url, &tmp).await.expect("the download");
+    println!("{:?} bytes", opened.byte_len);
+    let (mime, len) = (stream.mime_type.clone(), opened.byte_len);
+    tokio::task::spawn_blocking(move || {
+      LocalPlayer::prepare_stream(opened.reader, mime.as_deref(), len)
+    })
+    .await
+    .unwrap()
+    .expect("a decoder");
+    println!("decoder built");
   }
 }

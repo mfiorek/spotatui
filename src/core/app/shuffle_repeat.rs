@@ -44,6 +44,12 @@ impl App {
         s.set_shuffle(on);
       }
     }
+    #[cfg(feature = "tidal")]
+    if let Some(s) = self.tidal_playback.as_mut() {
+      if !s.advancing {
+        s.set_shuffle(on);
+      }
+    }
   }
 
   /// Re-sync the active queueable source's queue order to `decoded_shuffle` when
@@ -84,6 +90,12 @@ impl App {
     }
     #[cfg(feature = "qobuz")]
     if let Some(s) = self.qobuz_playback.as_mut() {
+      if !s.advancing && s.shuffle_backup.is_some() != on {
+        s.set_shuffle(on);
+      }
+    }
+    #[cfg(feature = "tidal")]
+    if let Some(s) = self.tidal_playback.as_mut() {
       if !s.advancing && s.shuffle_backup.is_some() != on {
         s.set_shuffle(on);
       }

@@ -257,6 +257,22 @@ fn source_playback_snapshot(app: &App) -> Option<PlaybackSnapshot> {
     ));
   }
 
+  #[cfg(feature = "tidal")]
+  if let Some(tidal) = app.tidal_playback() {
+    let track = tidal.tracks.get(tidal.index)?;
+    return Some(source_snapshot(
+      track.name.clone(),
+      track.artists.clone(),
+      track.album.clone(),
+      track.duration_ms as u32,
+      track.uri.clone(),
+      track.image_url.clone(),
+      tidal.player.position().as_millis(),
+      !tidal.player.is_paused(),
+      app,
+    ));
+  }
+
   #[cfg(feature = "youtube")]
   if let Some(youtube) = app.youtube_playback.as_ref() {
     let track = youtube.tracks.get(youtube.index)?;

@@ -175,6 +175,8 @@ impl Default for App {
       subsonic_playback: None,
       #[cfg(feature = "qobuz")]
       qobuz_playback: None,
+      #[cfg(feature = "tidal")]
+      tidal_playback: None,
       #[cfg(feature = "internet-radio")]
       radio_playback: None,
       #[cfg(feature = "youtube")]

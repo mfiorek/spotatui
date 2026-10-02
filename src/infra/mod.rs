@@ -23,6 +23,8 @@ pub mod network;
 #[cfg(feature = "streaming")]
 pub mod player;
 pub mod playlist_sync;
+#[cfg(any(feature = "qobuz", feature = "tidal"))]
+pub mod progressive;
 #[cfg(feature = "qobuz")]
 pub mod qobuz;
 pub mod queue;

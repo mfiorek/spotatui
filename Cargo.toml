@@ -77,8 +77,8 @@ bytes = { version = "1", optional = true }
 
 # stream-download buffers a byte stream behind a Read+Seek adapter that rodio
 # can decode while the download runs. Internet radio uses it on an infinite HTTP
-# (ICY) stream, without seeking; Qobuz uses it on its segment transport, with
-# seeking. icy-metadata parses in-band StreamTitle now-playing metadata and is
+# (ICY) stream, without seeking; Qobuz uses it on its segment transport and
+# Tidal on a plain HTTP download, both with seeking. icy-metadata parses in-band StreamTitle now-playing metadata and is
 # only compiled under the opt-in `internet-radio` feature.
 stream-download = { version = "0.24", optional = true, default-features = false, features = ["reqwest-rustls"] }
 icy-metadata = { version = "0.6", optional = true, default-features = false }
@@ -214,8 +214,10 @@ youtube = ["audio-decode-queue", "queue", "queue-download"]
 # Qobuz through its encrypted CMAF stream: each track is decrypted and rebuilt
 # as a FLAC tempfile while it plays through the shared LocalPlayer.
 qobuz = ["audio-decode-queue", "queue", "queue-download", "reqwest/stream", "dep:stream-download", "dep:bytes", "dep:md-5", "dep:sha2", "dep:hex", "dep:base64", "dep:regex", "dep:aes", "dep:cbc", "dep:ctr", "dep:hkdf"]
-# Tidal through the private client API (device-flow login).
-tidal = []
+# Tidal through the private client API (device-flow login). Each track plays
+# while it downloads from the CDN URL in its manifest, into a tempfile the
+# session keeps for repeat-one.
+tidal = ["audio-decode-queue", "queue", "queue-download", "dep:stream-download", "dep:base64"]
 
 # --- AI DJ / MCP -------------------------------------------------------------
 # Shared tool layer behind both front doors: the taste brief built from the local
