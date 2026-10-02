@@ -13,8 +13,12 @@
 
 pub mod auth;
 pub mod client;
+pub mod dash;
 pub mod dispatch;
 pub mod manifest;
+#[cfg(test)]
+mod probe;
+pub mod segments;
 pub mod stream;
 mod types;
 
@@ -314,13 +318,13 @@ impl TidalSource {
 }
 
 impl TidalSource {
-  /// Ask for a track's stream and decode its manifest.
-  pub async fn stream_source(&self, track_id: &str) -> Result<StreamSource> {
+  /// Ask for a track's stream at `quality` and decode its manifest.
+  pub async fn stream_source(&self, track_id: &str, quality: &str) -> Result<StreamSource> {
     let info: PlaybackInfo = self
       .client
       .get_json(
         &manifest::playback_info_path(track_id),
-        &manifest::playback_info_params(manifest::REQUESTED_QUALITY),
+        &manifest::playback_info_params(quality),
       )
       .await?;
     manifest::stream_source(&info)
@@ -606,13 +610,22 @@ pub(crate) mod test_server {
 
   /// A file server that honours `Range`, for the download tests.
   pub struct FileServer {
-    ranges: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    requests: std::sync::Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>,
   }
 
   impl FileServer {
     /// The `Range` header of each request so far, in arrival order.
     pub fn ranges(&self) -> Vec<Option<String>> {
-      self.ranges.lock().unwrap().clone()
+      self
+        .requests()
+        .into_iter()
+        .map(|(_, range)| range)
+        .collect()
+    }
+
+    /// The path and `Range` header of each request so far, in arrival order.
+    pub fn requests(&self) -> Vec<(String, Option<String>)> {
+      self.requests.lock().unwrap().clone()
     }
   }
 
@@ -621,25 +634,42 @@ pub(crate) mod test_server {
   /// the reader seeks. Request number `hang_from` and later get their headers
   /// and then no body.
   pub async fn serve_file(body: Vec<u8>, hang_from: Option<usize>) -> (String, FileServer) {
+    let (base, server) = serve_files(vec![("/track.m4a".to_string(), body)], hang_from, true).await;
+    (format!("{base}/track.m4a"), server)
+  }
+
+  /// Serve each `(path, body)` like [`serve_file`]; any other path is a 404.
+  /// Without `honour_range`, every request gets the whole body with a 200.
+  /// Returns the base URL.
+  pub async fn serve_files(
+    files: Vec<(String, Vec<u8>)>,
+    hang_from: Option<usize>,
+    honour_range: bool,
+  ) -> (String, FileServer) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}/track.m4a", listener.local_addr().unwrap());
-    let ranges = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let log = std::sync::Arc::clone(&ranges);
-    let body = std::sync::Arc::new(body);
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = std::sync::Arc::clone(&requests);
+    let files: std::sync::Arc<std::collections::HashMap<String, Vec<u8>>> =
+      std::sync::Arc::new(files.into_iter().collect());
     tokio::spawn(async move {
       while let Ok((mut stream, _)) = listener.accept().await {
-        let body = std::sync::Arc::clone(&body);
+        let files = std::sync::Arc::clone(&files);
         let log = std::sync::Arc::clone(&log);
         tokio::spawn(async move {
           let (read_half, mut write_half) = stream.split();
           let mut reader = BufReader::new(read_half);
+          let mut path = String::new();
           let mut range = None;
           loop {
             let mut line = String::new();
             if reader.read_line(&mut line).await.unwrap_or(0) == 0 || line == "\r\n" {
               break;
             }
-            if let Some((name, value)) = line.split_once(':') {
+            if path.is_empty() {
+              let target = line.split_whitespace().nth(1).unwrap_or("");
+              path = target.split('?').next().unwrap_or("").to_string();
+            } else if let Some((name, value)) = line.split_once(':') {
               if name.eq_ignore_ascii_case("range") {
                 range = Some(value.trim().to_string());
               }
@@ -647,9 +677,18 @@ pub(crate) mod test_server {
           }
           let number = {
             let mut log = log.lock().unwrap();
-            log.push(range.clone());
+            log.push((path.clone(), range.clone()));
             log.len() - 1
           };
+          let Some(body) = files.get(&path) else {
+            let _ = write_half
+              .write_all(
+                b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+              )
+              .await;
+            return;
+          };
+          let range = range.filter(|_| honour_range);
           let total = body.len();
           let (start, end) = range
             .as_deref()
@@ -689,7 +728,7 @@ pub(crate) mod test_server {
         });
       }
     });
-    (url, FileServer { ranges })
+    (base, FileServer { requests })
   }
 }
 
@@ -959,13 +998,19 @@ mod tests {
       r#"{{"audioQuality":"HIGH","manifestMimeType":"application/vnd.tidal.bts","manifest":"{manifest}"}}"#
     );
     let (base, server) = serve(vec![Reply::new("200 OK", reply)]).await;
-    let stream = source_at(&base).stream_source("77").await.unwrap();
-    assert_eq!(stream.url, "https://cdn/t.m4a");
+    let stream = source_at(&base)
+      .stream_source("77", manifest::REQUESTED_QUALITY)
+      .await
+      .unwrap();
+    assert!(
+      matches!(&stream.kind, manifest::StreamKind::Bts { url, .. } if url == "https://cdn/t.m4a"),
+      "{stream:?}"
+    );
     assert_eq!(stream.delivered, Delivered::High);
     let requests = server.await.unwrap();
     assert!(
       requests[0].starts_with(
-        "GET /v1/tracks/77/playbackinfopostpaywall?playbackmode=STREAM&audioquality=HIGH&assetpresentation=FULL&countryCode=NO"
+        "GET /v1/tracks/77/playbackinfopostpaywall?playbackmode=STREAM&audioquality=HI_RES_LOSSLESS&assetpresentation=FULL&countryCode=NO"
       ),
       "{}",
       requests[0]
@@ -1014,9 +1059,10 @@ mod tests {
     println!("search: {} - {}", hit.name, hit.artists.join(", "));
   }
 
-  /// Streams the first favorite track: the manifest, the CDN download into a
-  /// tempfile, and a decoder over it (which probes the container, so an MP4
-  /// with its `moov` at the end shows up here). No audio device needed.
+  /// Opens a hi-res track and one without a hi-res master through the
+  /// playback path: the manifest, the download into a tempfile (DASH
+  /// segments or the BTS file) and a decoder over it, which probes the
+  /// container. No audio device needed.
   ///
   /// `cargo test --features tidal -- --ignored live_tidal_stream --nocapture`
   #[tokio::test(flavor = "multi_thread")]
@@ -1027,29 +1073,21 @@ mod tests {
     let client = auth::client_credentials(&config.behavior).expect("a Tidal client ID");
     let source = TidalSource::new(restore_login(client).await.expect("a saved login"));
 
-    let tracks = source.tracks(FAVORITES_URI).await.expect("favorite tracks");
-    let track = tracks.first().expect("a favorite track");
-    let uri = track.uri.as_deref().expect("a track URI");
-    let stream = source
-      .stream_source(track_id_from_uri(uri).unwrap())
-      .await
-      .expect("a stream");
-    println!(
-      "{}: {} ({:?})",
-      track.name,
-      stream.delivered.label(),
-      stream.mime_type
-    );
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let opened = stream::open(&stream.url, &tmp).await.expect("the download");
-    println!("{:?} bytes", opened.byte_len);
-    let (mime, len) = (stream.mime_type.clone(), opened.byte_len);
-    tokio::task::spawn_blocking(move || {
-      LocalPlayer::prepare_stream(opened.reader, mime.as_deref(), len)
-    })
-    .await
-    .unwrap()
-    .expect("a decoder");
-    println!("decoder built");
+    // Hi-res as of 2026-10, then a track Tidal has no hi-res master of.
+    for query in ["Taylor Swift The Fate of Ophelia", "Daft Punk Get Lucky"] {
+      let results = source.search(query).await.expect("search");
+      let track = results.tracks.first().expect("a search hit");
+      let uri = track.uri.as_deref().expect("a track URI");
+      let started = std::time::Instant::now();
+      let prepared = dispatch::prepare_track(&source, track_id_from_uri(uri).unwrap())
+        .await
+        .expect("a playable stream");
+      println!(
+        "{}: {} in {:?}",
+        track.name,
+        prepared.delivered.label(),
+        started.elapsed()
+      );
+    }
   }
 }

@@ -19,14 +19,29 @@
   dispatches `TidalLogin`, whose success reloads the sidebar. Ids go into
   request paths unescaped, so `listing_from_uri` admits only uuid characters.
 - Playback (`dispatch.rs`, after Qobuz's) asks `playbackinfopostpaywall` for
-  HIGH and decodes the BTS manifest (`manifest.rs`, pure): one direct,
-  unencrypted CDN URL, AAC in MP4. A DASH (hi-res) manifest is an error for
-  now. The track plays while it downloads: `stream.rs` runs a
-  `stream-download` `HttpStream` (Range requests on seek) into the session's
-  tempfile through the shared `infra/progressive.rs`. That client has a read
-  timeout but no request timeout, which would cut tracks off; it is
-  `stream-download`'s own `reqwest`, which can differ from the crate's. Errors
-  never print the URL: its query carries the CDN token.
+  HI_RES_LOSSLESS (`manifest.rs`, pure). A track with a hi-res master comes
+  back as unencrypted MPEG-DASH FLAC; any other comes back as HIGH over BTS:
+  one direct, unencrypted CDN URL, AAC in a plain (not fragmented) MP4.
+  Either way the track plays while it downloads into the session's tempfile
+  through the shared `infra/progressive.rs`.
+  - BTS: `stream.rs` runs a `stream-download` `HttpStream` (Range requests on
+    seek). That client has a read timeout but no request timeout, which would
+    cut tracks off; it is `stream-download`'s own `reqwest`, which can differ
+    from the crate's.
+  - DASH: the fMP4 is **not** passed through: symphonia's MP4 demuxer walks
+    every top-level box of a seekable source, a range request per segment.
+    `dash.rs` (pure) parses the MPD and the init segment's `dfLa` box;
+    `segments.rs` measures each segment's `mdat` with a 1 KiB Range request
+    (8 at a time) before playback, then feeds the shared `SegmentStream` the
+    FLAC header and each segment's `mdat` payload: a raw FLAC file the FLAC
+    demuxer seeks in. A payload whose size differs from the measured one is
+    an error, since every later offset depends on it.
+  - A DASH stream that fails to open is asked for again as HIGH (BTS). The
+    playbar shows what was delivered: `FLAC 24/48` read from STREAMINFO, or
+    `AAC 320`.
+  - Errors never print a URL: its query carries the CDN token.
+  - `probe.rs` is an ignored live test that prints the MPD and box layouts
+    (`live_tidal_probe`); run it when the delivery seems to have changed.
 - The session lives in the **private** `App::tidal_playback` (accessors in
   `core/app/playback_routing.rs`; `pub_fields_on_app` may only fall), so the
   driver's `decoded_device_recovery!` / `decoded_auto_advance!` use their

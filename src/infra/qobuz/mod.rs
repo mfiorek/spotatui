@@ -33,7 +33,7 @@ use crate::core::source::{MediaSource, PlaylistWriter, Searcher};
 use crate::infra::audio::LocalPlayer;
 use stream::cmaf::InitSegment;
 use stream::download;
-use stream::progressive::SegmentStream;
+use stream::progressive::{segment_stream, SegmentStream};
 
 pub use stream::cmaf::StreamQuality;
 
@@ -389,7 +389,7 @@ impl QobuzSource {
   ) -> Result<(InitSegment, SegmentStream)> {
     let stream = self.track_stream(track_id, format_id).await?;
     let init = download::fetch_init(&self.http, &stream.url_template).await?;
-    let segments = SegmentStream::new(
+    let segments = segment_stream(
       self.http.clone(),
       stream.url_template,
       stream.content_key,

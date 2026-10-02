@@ -72,13 +72,15 @@ aes = { version = "0.8", optional = true }
 cbc = { version = "0.1", optional = true }
 ctr = { version = "0.9", optional = true }
 hkdf = { version = "0.13", optional = true }
-# Qobuz progressive delivery: the chunk type of a stream-download source.
+# Progressive delivery (Qobuz, Tidal): the chunk type of a stream-download source.
 bytes = { version = "1", optional = true }
+# Tidal hi-res: the MPEG-DASH manifest.
+quick-xml = { version = "0.38", features = ["serialize"], optional = true }
 
 # stream-download buffers a byte stream behind a Read+Seek adapter that rodio
 # can decode while the download runs. Internet radio uses it on an infinite HTTP
 # (ICY) stream, without seeking; Qobuz uses it on its segment transport and
-# Tidal on a plain HTTP download, both with seeking. icy-metadata parses in-band StreamTitle now-playing metadata and is
+# Tidal on a plain HTTP download and its DASH segments, all with seeking. icy-metadata parses in-band StreamTitle now-playing metadata and is
 # only compiled under the opt-in `internet-radio` feature.
 stream-download = { version = "0.24", optional = true, default-features = false, features = ["reqwest-rustls"] }
 icy-metadata = { version = "0.6", optional = true, default-features = false }
@@ -217,7 +219,7 @@ qobuz = ["audio-decode-queue", "queue", "queue-download", "reqwest/stream", "dep
 # Tidal through the private client API (device-flow login). Each track plays
 # while it downloads from the CDN URL in its manifest, into a tempfile the
 # session keeps for repeat-one.
-tidal = ["audio-decode-queue", "queue", "queue-download", "dep:stream-download", "dep:base64"]
+tidal = ["audio-decode-queue", "queue", "queue-download", "dep:stream-download", "dep:base64", "dep:bytes", "dep:quick-xml"]
 
 # --- AI DJ / MCP -------------------------------------------------------------
 # Shared tool layer behind both front doors: the taste brief built from the local

@@ -3,17 +3,22 @@
 //! Pure: no network. The reply carries a base64 manifest whose shape depends
 //! on `manifestMimeType`. The AAC tiers (LOW, HIGH) come back as **BTS**, a
 //! JSON document with direct, unencrypted CDN URLs. HI_RES_LOSSLESS comes
-//! back as an unencrypted MPEG-DASH FLAC manifest when the track has a hi-res
-//! master; that one is not played yet. `audioQuality` names what the server
-//! delivered, which can be lower than what was asked for.
+//! back as an unencrypted MPEG-DASH FLAC manifest (see [`super::dash`]) when
+//! the track has a hi-res master, and as HIGH over BTS otherwise.
+//! `audioQuality` names what the server delivered, which can be lower than
+//! what was asked for.
 
 use anyhow::{anyhow, Context, Result};
 use base64::Engine as _;
 use serde::Deserialize;
 
-/// The tier asked for: HIGH (AAC 320), which this client type always gets
-/// over BTS.
-pub const REQUESTED_QUALITY: &str = "HIGH";
+use super::dash::FlacFormat;
+
+/// The tier asked for: DASH FLAC for a track with a hi-res master, HIGH AAC
+/// over BTS for any other (this client type never gets LOSSLESS over BTS).
+pub const REQUESTED_QUALITY: &str = "HI_RES_LOSSLESS";
+/// The tier asked for when the hi-res stream cannot be played: always BTS.
+pub const FALLBACK_QUALITY: &str = "HIGH";
 
 /// The query of a playback-info request for `quality`.
 pub fn playback_info_params(quality: &str) -> [(&'static str, String); 3] {
@@ -48,6 +53,8 @@ pub enum Delivered {
   High,
   Lossless,
   HiRes,
+  /// A FLAC stream whose STREAMINFO was read.
+  Flac(FlacFormat),
   Other(String),
 }
 
@@ -69,17 +76,29 @@ impl Delivered {
       Delivered::High => "AAC 320".to_string(),
       Delivered::Lossless => "FLAC 16/44.1".to_string(),
       Delivered::HiRes => "FLAC hi-res".to_string(),
+      Delivered::Flac(format) => format.label(),
       Delivered::Other(quality) => quality.clone(),
     }
   }
 }
 
-/// A playable source: one direct URL and its MIME type, for rodio's probe.
+/// A playable source and the quality the server says it delivered.
 #[derive(Debug, PartialEq)]
 pub struct StreamSource {
-  pub url: String,
-  pub mime_type: Option<String>,
+  pub kind: StreamKind,
   pub delivered: Delivered,
+}
+
+/// How the track is delivered.
+#[derive(Debug, PartialEq)]
+pub enum StreamKind {
+  /// One direct URL and its MIME type, for rodio's probe.
+  Bts {
+    url: String,
+    mime_type: Option<String>,
+  },
+  /// An MPEG-DASH manifest, parsed when the track is opened.
+  Dash { mpd: String },
 }
 
 #[derive(Deserialize)]
@@ -113,13 +132,19 @@ pub fn stream_source(info: &PlaybackInfo) -> Result<StreamSource> {
       .filter(|u| !u.is_empty())
       .ok_or_else(|| anyhow!("the manifest has no stream URL"))?;
     return Ok(StreamSource {
-      url,
-      mime_type: Some(manifest.mime_type).filter(|m| !m.is_empty()),
+      kind: StreamKind::Bts {
+        url,
+        mime_type: Some(manifest.mime_type).filter(|m| !m.is_empty()),
+      },
       delivered: Delivered::from_audio_quality(&info.audio_quality),
     });
   }
   if mime.contains("dash+xml") {
-    return Err(anyhow!("hi-res (DASH) streams are not supported yet"));
+    let mpd = String::from_utf8(raw).context("the DASH manifest is not UTF-8")?;
+    return Ok(StreamSource {
+      kind: StreamKind::Dash { mpd },
+      delivered: Delivered::from_audio_quality(&info.audio_quality),
+    });
   }
   Err(anyhow!("unsupported manifest type {mime:?}"))
 }
@@ -148,8 +173,10 @@ mod tests {
     assert_eq!(
       stream_source(&reply).unwrap(),
       StreamSource {
-        url: "https://cdn/a.m4a".to_string(),
-        mime_type: Some("audio/mp4".to_string()),
+        kind: StreamKind::Bts {
+          url: "https://cdn/a.m4a".to_string(),
+          mime_type: Some("audio/mp4".to_string()),
+        },
         delivered: Delivered::High,
       }
     );
@@ -159,7 +186,13 @@ mod tests {
   fn a_bts_manifest_without_an_encryption_type_is_plain() {
     let reply = info(BTS, "LOW", r#"{"urls":["https://cdn/a.m4a"]}"#);
     let source = stream_source(&reply).unwrap();
-    assert_eq!(source.mime_type, None);
+    assert!(matches!(
+      source.kind,
+      StreamKind::Bts {
+        mime_type: None,
+        ..
+      }
+    ));
     assert_eq!(source.delivered, Delivered::Low);
   }
 
@@ -182,10 +215,17 @@ mod tests {
   }
 
   #[test]
-  fn a_dash_manifest_is_not_supported_yet() {
+  fn a_dash_manifest_carries_its_mpd() {
     let reply = info("application/dash+xml", "HI_RES_LOSSLESS", "<MPD/>");
-    let err = stream_source(&reply).unwrap_err();
-    assert!(err.to_string().contains("DASH"), "{err:#}");
+    assert_eq!(
+      stream_source(&reply).unwrap(),
+      StreamSource {
+        kind: StreamKind::Dash {
+          mpd: "<MPD/>".to_string()
+        },
+        delivered: Delivered::HiRes,
+      }
+    );
   }
 
   #[test]
@@ -211,6 +251,11 @@ mod tests {
     assert_eq!(label("LOSSLESS"), "FLAC 16/44.1");
     assert_eq!(label("HI_RES_LOSSLESS"), "FLAC hi-res");
     assert_eq!(label("DOLBY_ATMOS"), "DOLBY_ATMOS");
+    let flac = Delivered::Flac(FlacFormat {
+      sample_rate: 96_000,
+      bits_per_sample: 24,
+    });
+    assert_eq!(flac.label(), "FLAC 24/96");
   }
 
   #[test]

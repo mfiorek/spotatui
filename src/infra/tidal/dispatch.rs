@@ -46,7 +46,8 @@ use tempfile::NamedTempFile;
 use tokio::sync::Mutex;
 
 use super::auth::{self, ClientCredentials, DeviceLogin};
-use super::manifest::Delivered;
+use super::dash;
+use super::manifest::{self, Delivered, StreamKind, StreamSource};
 use super::{track_id_from_uri, ResumePoint, TidalPlaybackState, TidalSource};
 use crate::core::app::{App, TrackTableContext};
 use crate::core::source::{MediaSource, Searcher, Source};
@@ -327,35 +328,75 @@ fn next_fetch_id() -> u64 {
 }
 
 /// A track whose download runs and whose decoder is built.
-struct PreparedTrack {
-  tempfile: NamedTempFile,
+pub(super) struct PreparedTrack {
+  pub(super) tempfile: NamedTempFile,
   complete: Completion,
-  delivered: Delivered,
+  pub(super) delivered: Delivered,
   stream: PreparedStream,
 }
 
-/// Ask for the track's manifest, open its download into a fresh tempfile and
-/// build its decoder, whose first read waits for the prefetch.
-async fn prepare_track(source: &TidalSource, track_id: &str) -> Result<PreparedTrack> {
-  let stream_source = source.stream_source(track_id).await?;
+/// Ask for the track in hi-res, open its download into a fresh tempfile and
+/// build its decoder, whose first read waits for the prefetch. A hi-res
+/// (DASH) stream that cannot be opened is asked for again as HIGH, which
+/// always comes over BTS.
+pub(super) async fn prepare_track(source: &TidalSource, track_id: &str) -> Result<PreparedTrack> {
+  let stream_source = source
+    .stream_source(track_id, manifest::REQUESTED_QUALITY)
+    .await?;
+  if !matches!(stream_source.kind, StreamKind::Dash { .. }) {
+    return prepare_source(track_id, stream_source).await;
+  }
+  match prepare_source(track_id, stream_source).await {
+    Ok(prepared) => Ok(prepared),
+    Err(e) => {
+      log::warn!(
+        "[tidal] track {track_id}: the hi-res stream failed ({e:#}); asking for {}",
+        manifest::FALLBACK_QUALITY
+      );
+      let fallback = source
+        .stream_source(track_id, manifest::FALLBACK_QUALITY)
+        .await?;
+      prepare_source(track_id, fallback).await
+    }
+  }
+}
+
+/// Open `stream_source` into a fresh tempfile and build its decoder.
+async fn prepare_source(track_id: &str, stream_source: StreamSource) -> Result<PreparedTrack> {
   let tempfile = NamedTempFile::new().context("creating temp file for Tidal stream")?;
-  let opened = super::stream::open(&stream_source.url, &tempfile).await?;
-  let mime = stream_source.mime_type;
-  let byte_len = opened.byte_len;
-  let reader = opened.reader;
+  let (reader, complete, mime, byte_len, delivered) = match stream_source.kind {
+    StreamKind::Bts { url, mime_type } => {
+      let opened = super::stream::open(&url, &tempfile).await?;
+      (
+        opened.reader,
+        opened.completion,
+        mime_type,
+        opened.byte_len,
+        stream_source.delivered,
+      )
+    }
+    StreamKind::Dash { mpd } => {
+      let manifest = dash::parse_mpd(&mpd)?;
+      let opened = super::segments::open(&manifest, &tempfile).await?;
+      (
+        opened.reader,
+        opened.completion,
+        Some("audio/flac".to_string()),
+        Some(opened.byte_len),
+        Delivered::Flac(opened.format),
+      )
+    }
+  };
   let stream = tokio::task::spawn_blocking(move || {
     LocalPlayer::prepare_stream(reader, mime.as_deref(), byte_len)
   })
   .await
   .context("decoder task")??;
-  log::info!(
-    "[tidal] track {track_id} delivered {}",
-    stream_source.delivered.label()
-  );
+  log::info!("[tidal] track {track_id} delivered {}", delivered.label());
   Ok(PreparedTrack {
     tempfile,
-    complete: opened.completion,
-    delivered: stream_source.delivered,
+    complete,
+    delivered,
     stream,
   })
 }
