@@ -399,4 +399,106 @@ mod tests {
 
     assert_eq!(found.as_deref(), Some("tidal:playlist:mine"));
   }
+
+  /// Delete a playlist the way python-tidal does: a v2 removal from the
+  /// root folder. Only the live test needs it.
+  async fn delete_playlist(source: &TidalSource, uuid: &str) -> Result<()> {
+    let params = [("trns", format!("trn:playlist:{uuid}"))];
+    source
+      .client
+      .send(&Call {
+        api: Api::V2,
+        method: Method::PUT,
+        path: "my-collection/playlists/folders/remove",
+        params: &params,
+        form: &[],
+        if_none_match: None,
+      })
+      .await?;
+    Ok(())
+  }
+
+  /// The keys of a playlist's tracks, in playlist order.
+  async fn track_keys(source: &TidalSource, uri: &str) -> Result<Vec<String>> {
+    let read = source.sync_playlist(uri).await?;
+    Ok(read.tracks.into_iter().map(|t| t.key).collect())
+  }
+
+  /// Adopt the new playlist by name, add two tracks, remove one, reading the
+  /// playlist back after each write.
+  async fn exercise_writes(
+    source: &TidalSource,
+    name: &str,
+    uri: &str,
+    keys: &[String],
+  ) -> Result<()> {
+    let adopted = source.own_playlist_named(name).await?;
+    anyhow::ensure!(
+      adopted.as_deref() == Some(uri),
+      "adopted by name: {adopted:?}"
+    );
+
+    source.add_tracks(uri, keys).await?;
+    let after_add = track_keys(source, uri).await?;
+    println!("after add: {after_add:?}");
+    anyhow::ensure!(after_add == keys, "after add: {after_add:?}");
+
+    source.remove_tracks(uri, &keys[..1]).await?;
+    let after_remove = track_keys(source, uri).await?;
+    println!("after remove: {after_remove:?}");
+    anyhow::ensure!(after_remove == keys[1..], "after remove: {after_remove:?}");
+    Ok(())
+  }
+
+  /// Every playlist-sync write against the real account: create a temporary
+  /// playlist, find it by name, add two search hits, remove one, read it back
+  /// after each step, then delete it. The playlist is deleted even when a step
+  /// fails; if the delete itself fails, its name is printed for a manual one.
+  ///
+  /// `cargo test --features tidal -- --ignored live_tidal_playlist_sync --nocapture`
+  #[tokio::test(flavor = "multi_thread")]
+  #[ignore = "writes to the Tidal account: needs a saved login, a client ID and the network"]
+  async fn live_tidal_playlist_sync() {
+    let mut config = crate::core::user_config::UserConfig::new();
+    config.load_config().expect("config.yml");
+    let client =
+      super::super::auth::client_credentials(&config.behavior).expect("a Tidal client ID");
+    let source = TidalSource::new(
+      super::super::restore_login(client)
+        .await
+        .expect("a saved login"),
+    );
+
+    let mut keys: Vec<String> = Vec::new();
+    for track in source.sync_search("Daft Punk", 10).await.expect("search") {
+      if !keys.contains(&track.key) {
+        println!("track {}: {} - {}", track.key, track.title, track.artist);
+        keys.push(track.key);
+      }
+      if keys.len() == 2 {
+        break;
+      }
+    }
+    assert_eq!(keys.len(), 2, "two distinct search hits");
+
+    let stamp = std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .unwrap()
+      .as_secs();
+    let name = format!("spotatui live test {stamp}");
+    let uuid = source.create_playlist(&name).await.expect("create");
+    let uri = format!("{PLAYLIST_PREFIX}{uuid}");
+    println!("created {name:?} ({uri})");
+
+    let outcome = exercise_writes(&source, &name, &uri, &keys).await;
+    let deleted = delete_playlist(&source, &uuid).await;
+    match &deleted {
+      Ok(()) => println!("deleted {name:?}"),
+      Err(e) => println!("could not delete {name:?}, delete it by hand: {e:#}"),
+    }
+    outcome.expect("the playlist writes");
+    deleted.expect("the delete");
+    let still_listed = source.own_playlist_named(&name).await.expect("list");
+    assert_eq!(still_listed, None, "the playlist is gone");
+  }
 }

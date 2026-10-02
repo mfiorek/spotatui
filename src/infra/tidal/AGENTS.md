@@ -70,4 +70,5 @@
   mirror is adopted by name only among the user's own playlists (creator id
   equals user id); a followed one can be a master. A sync run never starts
   the device login (`dispatch::build_sync_source`), since it can run from the
-  CLI.
+  CLI. `live_tidal_playlist_sync` (ignored; it writes to the account) runs
+  every write against a temporary playlist it deletes afterwards.
