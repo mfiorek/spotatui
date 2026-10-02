@@ -3146,15 +3146,15 @@ fn queue_track_rejects_a_radio_stream() {
 }
 
 #[test]
-fn queue_track_rejects_a_tidal_track_for_now() {
+fn queue_track_keeps_a_tidal_track_off_the_spotify_web_api_queue() {
   let (mut app, rx) = app_with_channel();
+  // An external Spotify device takes queued Spotify tracks, never Tidal ones.
+  app.current_playback_context = Some(playback_context(true, false));
+
   app.apply(Action::QueueTrack(queued("tidal:track:11", "Song")));
 
-  assert!(app.native_queue.is_empty());
-  assert_eq!(
-    app.status_message(),
-    Some("Tidal tracks can't be queued yet")
-  );
+  assert_eq!(app.native_queue.len(), 1);
+  assert_eq!(app.status_message(), Some("Queued: Song"));
   assert!(rx.try_recv().is_err(), "expected no IoEvent dispatched");
 }
 

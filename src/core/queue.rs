@@ -13,10 +13,11 @@ pub enum QueueItemSource {
   Subsonic,
   YouTube,
   Qobuz,
+  Tidal,
 }
 
 /// Classify a queue item by its URI scheme. Anything that is not a local file,
-/// Subsonic, YouTube, or Qobuz URI is treated as Spotify (the `spotify:track:`
+/// Subsonic, YouTube, Qobuz, or Tidal URI is treated as Spotify (the `spotify:track:`
 /// scheme). Radio URIs (`radio:`) are never queued, so they are rejected before
 /// reaching this function.
 pub fn queue_item_source(uri: &str) -> QueueItemSource {
@@ -28,6 +29,8 @@ pub fn queue_item_source(uri: &str) -> QueueItemSource {
     QueueItemSource::YouTube
   } else if uri.starts_with("qobuz:") {
     QueueItemSource::Qobuz
+  } else if uri.starts_with("tidal:") {
+    QueueItemSource::Tidal
   } else {
     QueueItemSource::Spotify
   }
@@ -45,7 +48,8 @@ pub fn queue_item_source(uri: &str) -> QueueItemSource {
 /// So callers taking a URI from an agent gate on this first. `spotify:track:` is
 /// the only Spotify form that names a single track; the other three schemes are
 /// opaque handles minted by their own sources, which cannot be validated further
-/// here. `radio:` is deliberately absent — a live stream is not a finite track
+/// here. Tidal also mints playlist and album URIs, so only `tidal:track:` names
+/// a track. `radio:` is deliberately absent — a live stream is not a finite track
 /// and `App::add_track_to_native_queue` rejects it.
 ///
 /// A bare scheme with nothing behind it (`spotify:track:`, `file:`) names no
@@ -54,13 +58,20 @@ pub fn queue_item_source(uri: &str) -> QueueItemSource {
 /// than have an empty handle queued for it.
 #[cfg_attr(not(any(feature = "mcp-server", feature = "ai-dj")), allow(dead_code))]
 pub fn is_playable_track_uri(uri: &str) -> bool {
-  ["spotify:track:", "file:", "subsonic:", "youtube:", "qobuz:"]
-    .iter()
-    .any(|prefix| {
-      uri
-        .strip_prefix(prefix)
-        .is_some_and(|rest| !rest.trim().is_empty())
-    })
+  [
+    "spotify:track:",
+    "file:",
+    "subsonic:",
+    "youtube:",
+    "qobuz:",
+    "tidal:track:",
+  ]
+  .iter()
+  .any(|prefix| {
+    uri
+      .strip_prefix(prefix)
+      .is_some_and(|rest| !rest.trim().is_empty())
+  })
 }
 
 /// The Cargo feature that would make `uri`'s source playable, if this build is
@@ -88,6 +99,7 @@ pub fn missing_source_feature(uri: &str) -> Option<&'static str> {
     QueueItemSource::Subsonic => "subsonic",
     QueueItemSource::YouTube => "youtube",
     QueueItemSource::Qobuz => "qobuz",
+    QueueItemSource::Tidal => "tidal",
     QueueItemSource::Spotify => unreachable!("returned above"),
   })
 }
@@ -101,6 +113,7 @@ pub fn source_label(source: QueueItemSource) -> &'static str {
     QueueItemSource::Subsonic => "Subsonic",
     QueueItemSource::YouTube => "YouTube",
     QueueItemSource::Qobuz => "Qobuz",
+    QueueItemSource::Tidal => "Tidal",
   }
 }
 
@@ -116,6 +129,7 @@ pub fn source_available(source: QueueItemSource) -> bool {
     QueueItemSource::Subsonic => cfg!(feature = "subsonic"),
     QueueItemSource::YouTube => cfg!(feature = "youtube"),
     QueueItemSource::Qobuz => cfg!(feature = "qobuz"),
+    QueueItemSource::Tidal => cfg!(feature = "tidal"),
   }
 }
 
@@ -171,6 +185,11 @@ pub enum SuspendedContext {
     resume_index: Option<usize>,
     resume_position_ms: u64,
   },
+  #[cfg(feature = "tidal")]
+  Tidal {
+    resume_index: Option<usize>,
+    resume_position_ms: u64,
+  },
   #[cfg(feature = "youtube")]
   YouTube {
     resume_index: Option<usize>,
@@ -209,6 +228,7 @@ mod tests {
       QueueItemSource::YouTube
     );
     assert_eq!(queue_item_source("qobuz:track:42"), QueueItemSource::Qobuz);
+    assert_eq!(queue_item_source("tidal:track:42"), QueueItemSource::Tidal);
     // Unknown schemes fall back to Spotify.
     assert_eq!(
       queue_item_source("something-else"),
@@ -224,6 +244,7 @@ mod tests {
       "subsonic:track:1",
       "youtube:5NV6Rdv1a3I",
       "qobuz:track:42",
+      "tidal:track:42",
     ] {
       assert!(is_playable_track_uri(uri), "{uri} should be playable");
     }
@@ -247,6 +268,10 @@ mod tests {
       "subsonic:",
       "youtube:",
       "qobuz:",
+      "tidal:track:",
+      // A Tidal listing is not a track.
+      "tidal:playlist:3f2a",
+      "tidal:album:42",
     ] {
       assert!(!is_playable_track_uri(uri), "{uri} should not be playable");
     }
@@ -259,6 +284,7 @@ mod tests {
     assert_eq!(source_label(QueueItemSource::Subsonic), "Subsonic");
     assert_eq!(source_label(QueueItemSource::YouTube), "YouTube");
     assert_eq!(source_label(QueueItemSource::Qobuz), "Qobuz");
+    assert_eq!(source_label(QueueItemSource::Tidal), "Tidal");
   }
 
   #[test]
@@ -283,6 +309,7 @@ mod tests {
       ("subsonic:abc", "subsonic", cfg!(feature = "subsonic")),
       ("youtube:abc", "youtube", cfg!(feature = "youtube")),
       ("qobuz:track:1", "qobuz", cfg!(feature = "qobuz")),
+      ("tidal:track:1", "tidal", cfg!(feature = "tidal")),
     ] {
       assert!(is_playable_track_uri(uri), "{uri} should be well-formed");
       assert_eq!(

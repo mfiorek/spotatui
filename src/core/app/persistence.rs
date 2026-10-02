@@ -44,6 +44,11 @@ impl App {
         resume_index,
         resume_position_ms,
       } => Some((*resume_index, *resume_position_ms)),
+      #[cfg(feature = "tidal")]
+      crate::core::queue::SuspendedContext::Tidal {
+        resume_index,
+        resume_position_ms,
+      } => Some((*resume_index, *resume_position_ms)),
       #[cfg(feature = "youtube")]
       crate::core::queue::SuspendedContext::YouTube {
         resume_index,
@@ -150,6 +155,34 @@ impl App {
         }
       }
     }
+    #[cfg(feature = "tidal")]
+    if let Some(s) = self.tidal_playback.as_ref() {
+      match self.suspended_resume() {
+        Some((Some(index), position_ms)) => {
+          return Some(PersistedPlayback::Tidal {
+            tracks: s.tracks.clone(),
+            index,
+            position_ms,
+            paused: false,
+            repeat: self.decoded_repeat,
+            shuffle_on: self.decoded_shuffle,
+            shuffle: s.shuffle_backup.clone(),
+          });
+        }
+        Some((None, _)) => {}
+        None => {
+          return Some(PersistedPlayback::Tidal {
+            tracks: s.tracks.clone(),
+            index: s.index,
+            position_ms: s.player.position().as_millis() as u64,
+            paused: s.player.is_paused(),
+            repeat: self.decoded_repeat,
+            shuffle_on: self.decoded_shuffle,
+            shuffle: s.shuffle_backup.clone(),
+          });
+        }
+      }
+    }
     #[cfg(feature = "local-files")]
     if let Some(s) = self.local_playback.as_ref() {
       match self.suspended_resume() {
@@ -235,6 +268,10 @@ impl App {
       }
       #[cfg(feature = "qobuz")]
       if self.qobuz_playback.is_some() && context_resumable {
+        return true;
+      }
+      #[cfg(feature = "tidal")]
+      if self.tidal_playback.is_some() && context_resumable {
         return true;
       }
       #[cfg(feature = "local-files")]

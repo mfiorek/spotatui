@@ -291,6 +291,8 @@ async fn try_play_queued(app: &Arc<Mutex<App>>, track: &TrackInfo) -> bool {
     QueueItemSource::Subsonic => play_queued_subsonic(app, track, &uri).await,
     #[cfg(feature = "qobuz")]
     QueueItemSource::Qobuz => play_queued_qobuz(app, track, &uri).await,
+    #[cfg(feature = "tidal")]
+    QueueItemSource::Tidal => play_queued_tidal(app, track, &uri).await,
     #[cfg(feature = "youtube")]
     QueueItemSource::YouTube => play_queued_youtube(app, track, &uri).await,
     #[cfg(feature = "streaming")]
@@ -378,6 +380,29 @@ async fn play_queued_qobuz(app: &Arc<Mutex<App>>, track: &TrackInfo, uri: &str) 
   let name = track.name.clone();
   tokio::spawn(async move {
     let result = crate::infra::qobuz::dispatch::download_for_queue(&source, &uri, quality)
+      .await
+      .map(|(tmp, label)| (tmp, Some(label)));
+    finish_decoded_fetch(&app, fetch_id, result, &name).await;
+  });
+  true
+}
+
+#[cfg(feature = "tidal")]
+async fn play_queued_tidal(app: &Arc<Mutex<App>>, track: &TrackInfo, uri: &str) -> bool {
+  release_librespot(app, Source::Tidal).await;
+  let Some(source) = crate::infra::tidal::dispatch::build_playback_source(app).await else {
+    return false; // build_playback_source surfaced its own status
+  };
+  let Some(player) = acquire_queue_player(app).await else {
+    return false;
+  };
+  let fetch_id = publish_pending_decoded(app, &player, track).await;
+  // Fetch off the IoEvent pump, like Qobuz: a Tidal track is a long download.
+  let app = Arc::clone(app);
+  let uri = uri.to_string();
+  let name = track.name.clone();
+  tokio::spawn(async move {
+    let result = crate::infra::tidal::dispatch::download_for_queue(&source, &uri)
       .await
       .map(|(tmp, label)| (tmp, Some(label)));
     finish_decoded_fetch(&app, fetch_id, result, &name).await;
@@ -751,6 +776,10 @@ async fn suspended_context_player(app: &Arc<Mutex<App>>) -> Option<Arc<LocalPlay
   if let Some(s) = guard.qobuz_playback.as_ref() {
     return Some(Arc::clone(&s.player));
   }
+  #[cfg(feature = "tidal")]
+  if let Some(s) = guard.tidal_playback() {
+    return Some(Arc::clone(&s.player));
+  }
   #[cfg(feature = "youtube")]
   if let Some(s) = guard.youtube_playback.as_ref() {
     return Some(Arc::clone(&s.player));
@@ -872,6 +901,11 @@ async fn resume_or_finish(app: &Arc<Mutex<App>>, end: QueueEnd) {
       resume_index,
       resume_position_ms,
     }) => resume_qobuz(app, resume_index, resume_position_ms, queue_player, playing).await,
+    #[cfg(feature = "tidal")]
+    Some(SuspendedContext::Tidal {
+      resume_index,
+      resume_position_ms,
+    }) => resume_tidal(app, resume_index, resume_position_ms, queue_player, playing).await,
     #[cfg(feature = "youtube")]
     Some(SuspendedContext::YouTube {
       resume_index,
@@ -974,6 +1008,8 @@ fn drain_resumes_decoded(
     Some(SuspendedContext::Subsonic { resume_index, .. }) => resume_index.is_some(),
     #[cfg(feature = "qobuz")]
     Some(SuspendedContext::Qobuz { resume_index, .. }) => resume_index.is_some(),
+    #[cfg(feature = "tidal")]
+    Some(SuspendedContext::Tidal { resume_index, .. }) => resume_index.is_some(),
     #[cfg(feature = "youtube")]
     Some(SuspendedContext::YouTube { resume_index, .. }) => resume_index.is_some(),
     // A station resumes through its own start, which releases librespot.
@@ -1007,6 +1043,13 @@ fn drop_context_sharing(
       .qobuz_playback
       .take_if(|s| Arc::ptr_eq(&s.player, dead))
       .is_some(),
+    #[cfg(feature = "tidal")]
+    Some(SuspendedContext::Tidal { .. }) => {
+      app
+        .tidal_playback()
+        .is_some_and(|s| Arc::ptr_eq(&s.player, dead))
+        && app.set_tidal_playback(None).is_some()
+    }
     #[cfg(feature = "youtube")]
     Some(SuspendedContext::YouTube { .. }) => app
       .youtube_playback
@@ -1182,6 +1225,61 @@ async fn resume_qobuz(
       }
     }
     None => crate::infra::qobuz::dispatch::play_index(app, index, Some(resume)).await,
+  }
+}
+
+#[cfg(feature = "tidal")]
+async fn resume_tidal(
+  app: &Arc<Mutex<App>>,
+  resume_index: Option<usize>,
+  resume_position_ms: u64,
+  queue_player: Option<Arc<LocalPlayer>>,
+  playing: bool,
+) {
+  let Some(index) = resume_index else {
+    // Take under the lock, stop off it: a sink clear waits for the audio thread.
+    let session = {
+      let mut guard = app.lock().await;
+      guard.release_decoded_sink_claim();
+      guard.set_tidal_playback(None)
+    };
+    if let Some(s) = session {
+      Arc::clone(&s.player).stop_detached_holding(s);
+    }
+    if let Some(player) = queue_player {
+      player.stop();
+    }
+    return;
+  };
+  let resume = super::ResumePoint {
+    position_ms: resume_position_ms,
+    paused: !playing,
+  };
+  // Replay the retained file only when it is whole: the queue taking the
+  // shared player dropped the progressive reader, which stops its download.
+  let replay = {
+    let mut guard = app.lock().await;
+    match guard.tidal_playback_mut() {
+      Some(s) if index == s.index && s.file_is_complete() => {
+        s.advancing = true;
+        s.tempfile
+          .as_ref()
+          .map(|t| (Arc::clone(&s.player), t.path().to_path_buf()))
+      }
+      Some(_) => None,
+      None => return,
+    }
+  };
+  // The queue slot shares the context player, so it is never stopped here.
+  let _ = queue_player;
+  match replay {
+    Some((player, path)) => {
+      super::replay_file(player, path, Some(resume)).await;
+      if let Some(s) = app.lock().await.tidal_playback_mut() {
+        s.advancing = false;
+      }
+    }
+    None => crate::infra::tidal::dispatch::play_index(app, index, Some(resume)).await,
   }
 }
 

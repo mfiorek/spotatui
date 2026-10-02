@@ -371,10 +371,7 @@ impl App {
     // (skip semantics — resume at the context's next track) and start the queue.
     // An explicit Next advances the context even under Repeat One, matching the
     // per-source skip paths: repeat-one only replays on *auto* advance.
-    if self.active_decoded_source()
-      && !self.native_queue.is_empty()
-      && !self.tidal_ignores_native_queue()
-    {
+    if self.active_decoded_source() && !self.native_queue.is_empty() {
       self.suspend_active_decoded_context_for_skip(crate::infra::queue::SuspendCause::ManualSkip);
       self.song_progress_ms = 0;
       self.dispatch(IoEvent::AdvanceNativeQueue);

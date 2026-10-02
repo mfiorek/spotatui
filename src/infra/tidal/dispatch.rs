@@ -18,9 +18,11 @@
 //! download completed (a forward seek can leave a gap that was never filled);
 //! otherwise it fetches the track again.
 //!
-//! The native queue cannot suspend a Tidal session yet
-//! (`App::tidal_ignores_native_queue`): a Tidal list plays through, and
-//! queued items wait until it ends.
+//! The native queue suspends a Tidal session like any other decoded one: it
+//! aborts the fetch in flight and borrows the session's player, and a fetch
+//! that finishes while the queue owns the sink leaves the session alone for
+//! the queue's resume. A queued Tidal track is downloaded whole first
+//! ([`download_for_queue`]), as Qobuz's is.
 //!
 //! ## Browsing
 //!
@@ -54,7 +56,7 @@ use crate::core::source::{MediaSource, Searcher, Source};
 use crate::core::state::PersistedRuntimeState;
 use crate::infra::audio::{LocalPlayer, PreparedStream};
 use crate::infra::network::IoEvent;
-use crate::infra::progressive::Completion;
+use crate::infra::progressive::{Completion, TrackReader};
 use crate::infra::queue::{advance_index, replay_file, snapshot_tracks};
 
 /// How long the login URL stays in the status bar: the device code's lifetime.
@@ -100,12 +102,12 @@ pub async fn route_tidal_event(app: &Arc<Mutex<App>>, event: &IoEvent) -> bool {
     IoEvent::StartPlayback(None, Some(uris), offset)
       if uris.first().is_some_and(|u| is_tidal_uri(u)) =>
     {
-      start_tidal_queue(app, uris, offset.unwrap_or(0)).await;
+      start_tidal_queue(app, uris, offset.unwrap_or(0), None).await;
       true
     }
     // A single Tidal track with no surrounding list: a one-track queue.
     IoEvent::StartPlayback(Some(uri), _, _) if is_tidal_uri(uri) => {
-      start_tidal_queue(app, std::slice::from_ref(uri), 0).await;
+      start_tidal_queue(app, std::slice::from_ref(uri), 0, None).await;
       true
     }
     // Bare "resume current": ours only while Tidal owns the session.
@@ -228,6 +230,12 @@ async fn build_source(
   }
 }
 
+/// A source for the native queue's off-pump fetch; a missing login is only
+/// reported.
+pub(crate) async fn build_playback_source(app: &Arc<Mutex<App>>) -> Option<TidalSource> {
+  build_source(app, WhenLoggedOut::Message).await
+}
+
 // ---------------------------------------------------------------------------
 // Browse + search
 // ---------------------------------------------------------------------------
@@ -335,19 +343,22 @@ pub(super) struct PreparedTrack {
   stream: PreparedStream,
 }
 
-/// Ask for the track in hi-res, open its download into a fresh tempfile and
-/// build its decoder, whose first read waits for the prefetch. A hi-res
-/// (DASH) stream that cannot be opened is asked for again as HIGH, which
-/// always comes over BTS.
-pub(super) async fn prepare_track(source: &TidalSource, track_id: &str) -> Result<PreparedTrack> {
+/// Ask for the track in hi-res and run `step` on the stream. A hi-res (DASH)
+/// stream whose step fails is asked for again as HIGH, which always comes
+/// over BTS.
+async fn with_fallback<T, F, Fut>(source: &TidalSource, track_id: &str, step: F) -> Result<T>
+where
+  F: Fn(StreamSource) -> Fut,
+  Fut: std::future::Future<Output = Result<T>>,
+{
   let stream_source = source
     .stream_source(track_id, manifest::REQUESTED_QUALITY)
     .await?;
   if !matches!(stream_source.kind, StreamKind::Dash { .. }) {
-    return prepare_source(track_id, stream_source).await;
+    return step(stream_source).await;
   }
-  match prepare_source(track_id, stream_source).await {
-    Ok(prepared) => Ok(prepared),
+  match step(stream_source).await {
+    Ok(done) => Ok(done),
     Err(e) => {
       log::warn!(
         "[tidal] track {track_id}: the hi-res stream failed ({e:#}); asking for {}",
@@ -356,37 +367,84 @@ pub(super) async fn prepare_track(source: &TidalSource, track_id: &str) -> Resul
       let fallback = source
         .stream_source(track_id, manifest::FALLBACK_QUALITY)
         .await?;
-      prepare_source(track_id, fallback).await
+      step(fallback).await
     }
   }
+}
+
+/// Open the track's download into a fresh tempfile and build its decoder,
+/// whose first read waits for the prefetch.
+pub(super) async fn prepare_track(source: &TidalSource, track_id: &str) -> Result<PreparedTrack> {
+  with_fallback(source, track_id, |stream_source| {
+    prepare_source(track_id, stream_source)
+  })
+  .await
+}
+
+/// Download the track at `uri` whole into a tempfile, for the native queue
+/// engine's off-pump fetch (playing is the queue's job), and return its
+/// delivered format label.
+pub(crate) async fn download_for_queue(
+  source: &TidalSource,
+  uri: &str,
+) -> Result<(NamedTempFile, String)> {
+  let track_id = track_id_from_uri(uri)?;
+  let (tempfile, delivered) = with_fallback(source, track_id, |stream_source| {
+    download_source(track_id, stream_source)
+  })
+  .await?;
+  Ok((tempfile, delivered.label()))
+}
+
+/// A stream downloading into its tempfile.
+struct OpenedSource {
+  reader: TrackReader,
+  complete: Completion,
+  mime: Option<String>,
+  byte_len: Option<u64>,
+  delivered: Delivered,
+}
+
+/// Start downloading `stream_source` into `tempfile`.
+async fn open_source(
+  stream_source: StreamSource,
+  tempfile: &NamedTempFile,
+) -> Result<OpenedSource> {
+  Ok(match stream_source.kind {
+    StreamKind::Bts { url, mime_type } => {
+      let opened = super::stream::open(&url, tempfile).await?;
+      OpenedSource {
+        reader: opened.reader,
+        complete: opened.completion,
+        mime: mime_type,
+        byte_len: opened.byte_len,
+        delivered: stream_source.delivered,
+      }
+    }
+    StreamKind::Dash { mpd } => {
+      let manifest = dash::parse_mpd(&mpd)?;
+      let opened = super::segments::open(&manifest, tempfile).await?;
+      OpenedSource {
+        reader: opened.reader,
+        complete: opened.completion,
+        mime: Some("audio/flac".to_string()),
+        byte_len: Some(opened.byte_len),
+        delivered: Delivered::Flac(opened.format),
+      }
+    }
+  })
 }
 
 /// Open `stream_source` into a fresh tempfile and build its decoder.
 async fn prepare_source(track_id: &str, stream_source: StreamSource) -> Result<PreparedTrack> {
   let tempfile = NamedTempFile::new().context("creating temp file for Tidal stream")?;
-  let (reader, complete, mime, byte_len, delivered) = match stream_source.kind {
-    StreamKind::Bts { url, mime_type } => {
-      let opened = super::stream::open(&url, &tempfile).await?;
-      (
-        opened.reader,
-        opened.completion,
-        mime_type,
-        opened.byte_len,
-        stream_source.delivered,
-      )
-    }
-    StreamKind::Dash { mpd } => {
-      let manifest = dash::parse_mpd(&mpd)?;
-      let opened = super::segments::open(&manifest, &tempfile).await?;
-      (
-        opened.reader,
-        opened.completion,
-        Some("audio/flac".to_string()),
-        Some(opened.byte_len),
-        Delivered::Flac(opened.format),
-      )
-    }
-  };
+  let OpenedSource {
+    reader,
+    complete,
+    mime,
+    byte_len,
+    delivered,
+  } = open_source(stream_source, &tempfile).await?;
   let stream = tokio::task::spawn_blocking(move || {
     LocalPlayer::prepare_stream(reader, mime.as_deref(), byte_len)
   })
@@ -399,6 +457,28 @@ async fn prepare_source(track_id: &str, stream_source: StreamSource) -> Result<P
     delivered,
     stream,
   })
+}
+
+/// Download `stream_source` into a fresh tempfile, reading it to its end.
+async fn download_source(
+  track_id: &str,
+  stream_source: StreamSource,
+) -> Result<(NamedTempFile, Delivered)> {
+  let tempfile = NamedTempFile::new().context("creating temp file for Tidal stream")?;
+  let OpenedSource {
+    mut reader,
+    delivered,
+    ..
+  } = open_source(stream_source, &tempfile).await?;
+  tokio::task::spawn_blocking(move || std::io::copy(&mut reader, &mut std::io::sink()))
+    .await
+    .context("download task")?
+    .context("downloading the Tidal stream")?;
+  log::info!(
+    "[tidal] queued track {track_id} delivered {}",
+    delivered.label()
+  );
+  Ok((tempfile, delivered))
 }
 
 /// Fetch the track on a detached task, then play it when the session still
@@ -422,13 +502,18 @@ fn spawn_fetch(app: &Arc<Mutex<App>>, session: &mut TidalPlaybackState, track_id
 
 /// A failed fetch: tear the session down only if it still waits for this
 /// fetch, and report the error. A teardown rather than a skip: a skip would
-/// walk the list at tick speed when every track fails the same way.
+/// walk the list at tick speed when every track fails the same way. Under the
+/// native queue the session stays for the queue's resume, which fetches again.
 async fn fail_fetch(app: &Arc<Mutex<App>>, fetch_id: u64, step: &str, err: anyhow::Error) {
   let mut guard = app.lock().await;
   if guard
     .tidal_playback()
     .is_none_or(|s| s.fetch_id != fetch_id)
   {
+    return;
+  }
+  if guard.queue_owns_playback() {
+    log::warn!("[tidal] {step}: {err:#}");
     return;
   }
   let session = guard.set_tidal_playback(None);
@@ -447,6 +532,10 @@ async fn fail_fetch(app: &Arc<Mutex<App>>, fetch_id: u64, step: &str, err: anyho
 async fn commit_fetch(app: &Arc<Mutex<App>>, fetch_id: u64, prepared: PreparedTrack) {
   let claimed = {
     let guard = app.lock().await;
+    // The native queue owns the sink: the session stays for its resume.
+    if guard.queue_owns_playback() {
+      return;
+    }
     guard
       .tidal_playback()
       .filter(|s| s.fetch_id == fetch_id)
@@ -548,8 +637,14 @@ async fn commit_fetch(app: &Arc<Mutex<App>>, fetch_id: u64, prepared: PreparedTr
 }
 
 /// Begin playing a list of Tidal tracks, taking over the session and starting
-/// at `start_idx` (clamped into range).
-async fn start_tidal_queue(app: &Arc<Mutex<App>>, uris: &[String], start_idx: usize) {
+/// at `start_idx` (clamped into range). `resume` is applied when the first
+/// track plays (session restore), so it is in place before the fetch starts.
+pub(crate) async fn start_tidal_queue(
+  app: &Arc<Mutex<App>>,
+  uris: &[String],
+  start_idx: usize,
+  resume: Option<ResumePoint>,
+) {
   let tracks = {
     let guard = app.lock().await;
     let search = guard
@@ -597,7 +692,7 @@ async fn start_tidal_queue(app: &Arc<Mutex<App>>, uris: &[String], start_idx: us
     quality: None,
     shuffle_backup: None,
     fetch_id: next_fetch_id(),
-    resume_at: None,
+    resume_at: resume,
     fetch: None,
   };
   // Honor the player-global decoded shuffle for the freshly built queue.
@@ -690,9 +785,9 @@ async fn replay_current(app: &Arc<Mutex<App>>) -> bool {
 
 /// Play the queued track at `target` in the published session: the index moves
 /// at once and the download runs off the pump. Used by Next/Previous, the tick's
-/// auto-advance, and a replay that fetches again, which passes how the track
-/// starts as `resume`.
-async fn play_index(app: &Arc<Mutex<App>>, target: usize, resume: Option<ResumePoint>) {
+/// auto-advance, a replay that fetches again, and the native queue's resume;
+/// the last two pass how the track starts as `resume`.
+pub(crate) async fn play_index(app: &Arc<Mutex<App>>, target: usize, resume: Option<ResumePoint>) {
   let mut guard = app.lock().await;
   let Some(s) = guard.tidal_playback_mut() else {
     return; // session torn down between dispatch and here

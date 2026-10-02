@@ -27,9 +27,6 @@ fn start_playback_has_taker(event: &IoEvent, spotify_session: bool) -> bool {
     IoEvent::StartPlayback(..) => match start_playback_uri(event) {
       // Radio is never queued, so `queue_item_source` does not know its scheme.
       Some(uri) if uri.starts_with("radio:") => cfg!(feature = "internet-radio"),
-      // Tidal is not queueable yet, so `queue_item_source` would call it
-      // Spotify; the Tidal router takes it whenever the feature is in.
-      Some(uri) if uri.starts_with("tidal:") => cfg!(feature = "tidal"),
       Some(uri) => match queue_item_source(uri) {
         QueueItemSource::Spotify => spotify_session,
         source => source_available(source),
@@ -48,7 +45,6 @@ fn dropped_start_status(event: &IoEvent) -> String {
     Some(uri) if uri.starts_with("radio:") => {
       (!cfg!(feature = "internet-radio")).then_some("internet-radio")
     }
-    Some(uri) if uri.starts_with("tidal:") => (!cfg!(feature = "tidal")).then_some("tidal"),
     Some(uri) => missing_source_feature(uri),
     None => None,
   };

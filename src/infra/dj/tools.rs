@@ -400,8 +400,8 @@ pub fn parse_call(name: &str, args: &Value) -> Result<DjToolCall, ToolCallError>
       if !crate::core::queue::is_playable_track_uri(&uri) {
         return Err(invalid(
           "uri must name a single playable track (spotify:track:…, file:…, \
-           subsonic:…, youtube:…, or qobuz:track:…); album, playlist and https \
-           links are not playable here",
+           subsonic:…, youtube:…, qobuz:track:…, or tidal:track:…); album, \
+           playlist and https links are not playable here",
         ));
       }
       Ok(DjToolCall::PlayNow { uri })
@@ -817,6 +817,7 @@ mod tests {
       "file:/music/a.flac",
       "youtube:abc",
       "qobuz:track:1",
+      "tidal:track:1",
     ] {
       assert!(
         parse_call("play_now", &json!({"uri": uri})).is_ok(),

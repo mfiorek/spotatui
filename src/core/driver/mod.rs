@@ -633,8 +633,7 @@ impl Driver {
     // next tick would re-dispatch and skip several tracks per advance.
     #[cfg(feature = "audio-decode-queue")]
     //
-    // Two arms, as for `decoded_device_recovery!`; the accessor arm also takes
-    // the native-queue length the plan sees.
+    // Two arms, as for `decoded_device_recovery!`.
     macro_rules! decoded_auto_advance {
       ($app:ident, $playback:ident, $queue:ident) => {
         decoded_auto_advance!(
@@ -642,8 +641,7 @@ impl Driver {
           $queue,
           get: $app.$playback.as_ref(),
           get_mut: $app.$playback.as_mut(),
-          clear: $app.$playback = None,
-          queue_len: $app.native_queue.len()
+          clear: $app.$playback = None
         )
       };
       (
@@ -651,12 +649,11 @@ impl Driver {
         $queue:ident,
         get: $get:expr,
         get_mut: $get_mut:expr,
-        clear: $clear:expr,
-        queue_len: $queue_len:expr
+        clear: $clear:expr
       ) => {
         if !$app.queue_owns_playback() {
           use crate::infra::queue::next_index;
-          let queue_len = $queue_len;
+          let queue_len = $app.native_queue.len();
           let repeat = $app.decoded_repeat;
           let advance = $get.map(|s| {
             plan::decoded_advance(
@@ -701,16 +698,13 @@ impl Driver {
     decoded_auto_advance!(app, subsonic_playback, tracks);
     #[cfg(feature = "qobuz")]
     decoded_auto_advance!(app, qobuz_playback, tracks);
-    // Until the native queue can suspend a Tidal session, Tidal plays its own
-    // list through and leaves queued items for after it.
     #[cfg(feature = "tidal")]
     decoded_auto_advance!(
       app,
       tracks,
       get: app.tidal_playback(),
       get_mut: app.tidal_playback_mut(),
-      clear: app.set_tidal_playback(None),
-      queue_len: 0
+      clear: app.set_tidal_playback(None)
     );
     #[cfg(feature = "youtube")]
     decoded_auto_advance!(app, youtube_playback, tracks);

@@ -21,7 +21,7 @@
 //! tagged enum rather than one struct that fits none of them:
 //! - **Local** re-reads tags from disk, so only the `file://` URI queue + index
 //!   are needed.
-//! - **Subsonic / YouTube** got their metadata from a remote API / `yt-dlp`; it
+//! - **Subsonic / Qobuz / Tidal / YouTube** got their metadata from a remote API / `yt-dlp`; it
 //!   cannot be re-derived offline, so the full [`TrackInfo`] list is stored.
 //! - **Radio** is one infinite stream — no queue, just the station row to
 //!   reconnect to.
@@ -97,6 +97,19 @@ pub enum PersistedPlayback {
   },
   /// Qobuz: full track metadata (from the API) plus the queue position.
   Qobuz {
+    tracks: Vec<TrackInfo>,
+    index: usize,
+    position_ms: u64,
+    paused: bool,
+    #[serde(default)]
+    repeat: crate::infra::queue::RepeatMode,
+    #[serde(default)]
+    shuffle_on: bool,
+    #[serde(default)]
+    shuffle: Option<crate::infra::queue::ShuffleBackup>,
+  },
+  /// Tidal: full track metadata (from the API) plus the queue position.
+  Tidal {
     tracks: Vec<TrackInfo>,
     index: usize,
     position_ms: u64,
@@ -261,6 +274,26 @@ mod tests {
         shuffle: None,
       }),
       vec![],
+    );
+    save(&path, &s).unwrap();
+    assert_eq!(load(&path).unwrap(), Some(s));
+  }
+
+  #[test]
+  fn save_then_load_round_trips_tidal_playback() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("last_session.yml");
+    let s = session(
+      Some(PersistedPlayback::Tidal {
+        tracks: vec![track("tidal:track:1", "Hi-res")],
+        index: 0,
+        position_ms: 12_000,
+        paused: true,
+        repeat: RepeatMode::Context,
+        shuffle_on: false,
+        shuffle: None,
+      }),
+      vec![track("tidal:track:2", "Queued")],
     );
     save(&path, &s).unwrap();
     assert_eq!(load(&path).unwrap(), Some(s));

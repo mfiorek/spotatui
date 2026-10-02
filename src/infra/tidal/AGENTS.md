@@ -49,7 +49,11 @@
   `Completion` says every byte arrived (`stream-download` back-fills a
   forward seek's gap at the end, unless the reader was dropped first);
   otherwise it fetches the track again.
-- Not queueable yet: `add_track_to_native_queue` refuses `tidal:` URIs, and
-  `App::tidal_ignores_native_queue` keeps the native queue from suspending a
-  Tidal session (it has no `SuspendedContext` arm), so a Tidal list plays
-  through and queued items wait until it ends.
+- The native queue treats Tidal as Qobuz: `SuspendedContext::Tidal` aborts the
+  fetch in flight and lends the session's player to the queue slot, and a
+  fetch that lands while the queue owns the sink leaves the session for the
+  resume. A queued Tidal track is downloaded whole first
+  (`dispatch::download_for_queue`). The resume replays the tempfile only when
+  `file_is_complete()`: the slot dropped the progressive reader, which stops
+  its download. Only `tidal:track:` URIs are playable (`is_playable_track_uri`);
+  playlist and album URIs share the scheme.

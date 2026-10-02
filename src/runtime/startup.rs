@@ -938,6 +938,37 @@ async fn restore_playback_session(
         s.shuffle_backup = shuffle;
       }
     }
+    #[cfg(feature = "tidal")]
+    PersistedPlayback::Tidal {
+      tracks,
+      index,
+      position_ms,
+      paused,
+      repeat,
+      shuffle_on,
+      shuffle,
+    } => {
+      let uris: Vec<String> = tracks.iter().filter_map(|t| t.uri.clone()).collect();
+      if uris.is_empty() {
+        return;
+      }
+      // Seed the browse table so the start path's snapshot resolves metadata.
+      app.lock().await.track_table.tracks = tracks;
+      // The download runs off the pump; the seek and pause apply when it plays.
+      let resume = crate::infra::tidal::ResumePoint {
+        position_ms,
+        paused: resolve_paused(paused),
+      };
+      crate::infra::tidal::dispatch::start_tidal_queue(app, &uris, index, Some(resume)).await;
+      let mut guard = app.lock().await;
+      if guard.tidal_playback().is_some() {
+        guard.decoded_repeat = repeat;
+        guard.decoded_shuffle = shuffle_on;
+      }
+      if let Some(s) = guard.tidal_playback_mut() {
+        s.shuffle_backup = shuffle;
+      }
+    }
     #[cfg(feature = "youtube")]
     PersistedPlayback::YouTube {
       tracks,

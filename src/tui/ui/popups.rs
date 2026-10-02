@@ -368,7 +368,8 @@ fn queue_item_line(item: &PlayableInfo) -> String {
 /// pending over a still-playing context) it is that context's own upcoming
 /// tracks. Rows read from the still-alive per-source `*_playback` state.
 fn context_preview_lines(app: &App, max: usize) -> Vec<String> {
-  // Format the upcoming rows of a Subsonic/YouTube `TrackInfo` context list.
+  // Format the upcoming rows of a Subsonic/Qobuz/Tidal/YouTube `TrackInfo`
+  // context list.
   #[cfg(feature = "queue-download")]
   fn track_rows(
     tracks: &[crate::core::plugin_api::TrackInfo],
@@ -448,6 +449,11 @@ fn context_preview_lines(app: &App, max: usize) -> Vec<String> {
           _ => Vec::new(),
         }
       }
+      #[cfg(feature = "tidal")]
+      SuspendedContext::Tidal { resume_index, .. } => match (resume_index, app.tidal_playback()) {
+        (Some(i), Some(s)) => track_rows(&s.tracks, *i, max),
+        _ => Vec::new(),
+      },
       #[cfg(feature = "youtube")]
       SuspendedContext::YouTube { resume_index, .. } => {
         match (resume_index, app.youtube_playback.as_ref()) {
@@ -457,17 +463,6 @@ fn context_preview_lines(app: &App, max: usize) -> Vec<String> {
       }
       #[cfg(feature = "internet-radio")]
       SuspendedContext::Radio { station } => vec![format!("Resumes: {}", station.name)],
-      // A build whose only queueable source has no suspended context yet
-      // (Tidal alone) leaves the enum empty.
-      #[cfg(not(any(
-        feature = "streaming",
-        feature = "local-files",
-        feature = "subsonic",
-        feature = "qobuz",
-        feature = "youtube",
-        feature = "internet-radio"
-      )))]
-      _ => Vec::new(),
     };
   }
 
@@ -484,6 +479,10 @@ fn context_preview_lines(app: &App, max: usize) -> Vec<String> {
     }
     #[cfg(feature = "qobuz")]
     if let Some(s) = app.qobuz_playback.as_ref() {
+      return track_rows(&s.tracks, s.index + 1, max);
+    }
+    #[cfg(feature = "tidal")]
+    if let Some(s) = app.tidal_playback() {
       return track_rows(&s.tracks, s.index + 1, max);
     }
     #[cfg(feature = "youtube")]

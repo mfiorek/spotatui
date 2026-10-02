@@ -78,6 +78,22 @@ impl App {
       });
       return;
     }
+    #[cfg(feature = "tidal")]
+    #[allow(clippy::needless_return)]
+    if let Some(s) = self.tidal_playback.as_mut() {
+      let resume_index =
+        crate::infra::queue::resume_index_after_queue(s.index, s.tracks.len(), repeat, cause);
+      // The queue takes the sink: a download in flight must not commit onto it.
+      if let Some(fetch) = s.fetch.take() {
+        fetch.abort();
+      }
+      s.advancing = true;
+      self.queue_suspended = Some(crate::core::queue::SuspendedContext::Tidal {
+        resume_index,
+        resume_position_ms: 0,
+      });
+      return;
+    }
     #[cfg(feature = "internet-radio")]
     #[allow(clippy::needless_return)]
     if let Some(radio) = self.radio_playback.take() {
@@ -139,6 +155,22 @@ impl App {
       }
       s.advancing = true;
       self.queue_suspended = Some(crate::core::queue::SuspendedContext::Qobuz {
+        resume_index: Some(index),
+        resume_position_ms: position_ms,
+      });
+      return;
+    }
+    #[cfg(feature = "tidal")]
+    #[allow(clippy::needless_return)]
+    if let Some(s) = self.tidal_playback.as_mut() {
+      let position_ms = s.player.position().as_millis() as u64;
+      let index = s.index;
+      // The queue takes the sink: a download in flight must not commit onto it.
+      if let Some(fetch) = s.fetch.take() {
+        fetch.abort();
+      }
+      s.advancing = true;
+      self.queue_suspended = Some(crate::core::queue::SuspendedContext::Tidal {
         resume_index: Some(index),
         resume_position_ms: position_ms,
       });

@@ -34,12 +34,6 @@ impl App {
       self.set_status_message("Radio stations can't be queued", 3);
       return;
     }
-    // Nothing plays a queued Tidal track yet, and `queue_item_source` would
-    // hand it to librespot as a Spotify URI.
-    if uri.starts_with("tidal:") {
-      self.set_status_message("Tidal tracks can't be queued yet", 3);
-      return;
-    }
     // A Spotify track controlled on an external device has no native sink to
     // play through, so fall back to the Spotify Web-API queue.
     if matches!(
@@ -155,8 +149,8 @@ impl App {
   }
 
   /// The queue slot's player when it is playing a *decoded* queued track (local /
-  /// Subsonic / Qobuz / YouTube). `None` for a Spotify slot or an empty slot. Gated
-  /// on exactly those four sources: they are the decoded ones a queue item can
+  /// Subsonic / Qobuz / Tidal / YouTube). `None` for a Spotify slot or an empty
+  /// slot. Gated on exactly those five sources: they are the decoded ones a queue item can
   /// name, so a build whose only decoded source is internet radio has no
   /// decoded slot to look up.
   #[cfg(feature = "audio-decode-queue")]

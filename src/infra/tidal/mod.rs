@@ -61,7 +61,8 @@ pub struct TidalPlaybackState {
   /// Stamp of the fetch in flight; a finished fetch with another stamp is dropped.
   pub fetch_id: u64,
   /// A seek and pause to apply when the next track is staged (device
-  /// recovery, a replay that fetches again).
+  /// recovery, a replay that fetches again, the native queue's resume,
+  /// session restore).
   pub resume_at: Option<ResumePoint>,
   /// The fetch task in flight; aborted when the session is replaced or restamped.
   pub fetch: Option<tokio::task::AbortHandle>,

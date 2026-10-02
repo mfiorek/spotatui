@@ -411,20 +411,6 @@ impl App {
     self.tidal_playback.as_mut()
   }
 
-  /// Whether the active decoded context is a Tidal session, which the native
-  /// queue cannot suspend yet: a manual skip stays in the Tidal list, and
-  /// queued items wait until it ends.
-  pub(crate) fn tidal_ignores_native_queue(&self) -> bool {
-    #[cfg(feature = "tidal")]
-    {
-      self.tidal_playback.is_some() && !self.queue_owns_playback()
-    }
-    #[cfg(not(feature = "tidal"))]
-    {
-      false
-    }
-  }
-
   /// Replace the Tidal session; dropping the previous one aborts its download.
   #[cfg(feature = "tidal")]
   pub(crate) fn set_tidal_playback(
