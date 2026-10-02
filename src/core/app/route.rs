@@ -276,8 +276,9 @@ impl App {
       Source::Radio => IoEvent::GetRadioStations,
       Source::YouTube => IoEvent::GetYouTubePlaylists,
       Source::Qobuz => IoEvent::GetQobuzPlaylists,
-      // Tidal has no sidebar loader yet.
-      Source::Spotify | Source::Tidal => return,
+      // No sidebar loader yet: make sure the login is in place.
+      Source::Tidal => IoEvent::TidalLogin,
+      Source::Spotify => return,
     };
     self.dispatch(event);
   }

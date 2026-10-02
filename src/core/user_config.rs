@@ -598,6 +598,8 @@ pub struct BehaviorConfigString {
   pub subsonic_password: Option<String>,
   pub ytdlp_path: Option<String>,
   pub qobuz_quality: Option<u8>,
+  pub tidal_client_id: Option<String>,
+  pub tidal_client_secret: Option<String>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub radio_stations: Option<Vec<RadioStationConfig>>,
   // --- Phase 2: icons / glyphs / labels (defaults = today's glyphs) ---
@@ -788,6 +790,14 @@ pub struct BehaviorConfig {
   /// Qobuz stream quality: 5 (MP3 320), 6 (FLAC 16/44.1), 7 (FLAC 24/96),
   /// 27 (FLAC 24/192). Default 6.
   pub qobuz_quality: u8,
+  /// OAuth client ID for the Tidal device login. Never embedded in the
+  /// source: set it here or through `SPOTATUI_TIDAL_CLIENT_ID`, which takes
+  /// precedence. `None` until configured.
+  pub tidal_client_id: Option<String>,
+  /// OAuth client secret paired with `tidal_client_id`. **Stored in plaintext
+  /// in the YAML config**; `SPOTATUI_TIDAL_CLIENT_SECRET` takes precedence.
+  /// When neither is set, the client ID is sent as the secret.
+  pub tidal_client_secret: Option<String>,
   /// User-authored stations shown alongside stations saved at runtime.
   /// In-app favorite/remove actions mutate `state.yml`, not this list.
   pub radio_stations: Vec<RadioStationConfig>,
@@ -1184,6 +1194,8 @@ impl UserConfig {
         subsonic_password: None,
         ytdlp_path: None,
         qobuz_quality: QOBUZ_QUALITY_DEFAULT,
+        tidal_client_id: None,
+        tidal_client_secret: None,
         radio_stations: Vec::new(),
         // --- Phase 2: icons / glyphs / labels (defaults = today's glyphs) ---
         gauge_filled_icon: "⣿".to_string(),
@@ -1767,6 +1779,12 @@ impl UserConfig {
     if let Some(qobuz_quality) = behavior_config.qobuz_quality {
       self.behavior.qobuz_quality = qobuz_quality_or_default(qobuz_quality);
     }
+    if let Some(tidal_client_id) = trim_to_none(behavior_config.tidal_client_id) {
+      self.behavior.tidal_client_id = Some(tidal_client_id);
+    }
+    if let Some(tidal_client_secret) = trim_to_none(behavior_config.tidal_client_secret) {
+      self.behavior.tidal_client_secret = Some(tidal_client_secret);
+    }
 
     // ===== Phase 2: icons / glyphs / labels =====
     // Width-restricted glyphs (column math depends on them) are validated to
@@ -2201,6 +2219,8 @@ impl UserConfig {
       subsonic_password: self.behavior.subsonic_password.clone(),
       ytdlp_path: self.behavior.ytdlp_path.clone(),
       qobuz_quality: Some(self.behavior.qobuz_quality),
+      tidal_client_id: self.behavior.tidal_client_id.clone(),
+      tidal_client_secret: self.behavior.tidal_client_secret.clone(),
       radio_stations: if self.behavior.radio_stations.is_empty() {
         None
       } else {

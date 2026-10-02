@@ -61,9 +61,13 @@ decision is deliberately deferred: nothing upstream happens until then.
   silently.
 - **Playback:** the per-track `playbackinfopostpaywall` endpoint returns a
   manifest:
-  - LOW, HIGH and LOSSLESS come back as **BTS** manifests: direct CDN URLs,
-    unencrypted.
-  - HI_RES_LOSSLESS comes back as an **unencrypted MPEG-DASH** manifest.
+  - LOW and HIGH (AAC 96 / 320) come back as **BTS** manifests: direct CDN
+    URLs, unencrypted.
+  - This client type never gets LOSSLESS over BTS: a LOSSLESS request is
+    capped at HIGH AAC (cliamp verified this against the live API).
+  - HI_RES_LOSSLESS comes back as an **unencrypted MPEG-DASH** FLAC manifest
+    when the track has a hi-res master, and is downgraded to HIGH AAC over
+    BTS otherwise. The reply's `audioQuality` names what was delivered.
   - Nothing needs decrypting, so Qobuz's `stream/crypto.rs` and most of
     `stream/cmaf.rs` do not carry over.
 - **Library:** favorite tracks (cliamp caps them at 500), favorite artists →

@@ -6,7 +6,7 @@ worth knowing before adding an event:
 - **Source routing**: non-Spotify playback is routed by URI scheme *before* the
   Spotify handler, in this order: `route_queue_event` → `route_local_event`
   (`file:`) → `route_subsonic_event` (`subsonic:`) → `route_qobuz_event`
-  (`qobuz:`) → `route_radio_event` (`radio:`) → `route_youtube_event`
+  (`qobuz:`) → `route_tidal_event` (`tidal:`) → `route_radio_event` (`radio:`) → `route_youtube_event`
   (`youtube:`) → `Network::handle_network_event`.
   This is what keeps `infra/network/` Spotify-only.
 - **Claim gate**: before the routers, `start_playback_has_taker` drops a

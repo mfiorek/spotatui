@@ -321,7 +321,7 @@ same predicate the row uses, so the two cannot disagree.
 
 ### Config & on-disk files
 
-Six files, six owners - a value that changes as the app runs goes in state,
+Seven files, seven owners - a value that changes as the app runs goes in state,
 never config:
 
 | File | Owner | Contents |
@@ -332,6 +332,7 @@ never config:
 | `last_session.yml` (state dir) | `core/persisted_playback.rs` | non-Spotify playback + native queue |
 | `playlist_sync.yml` (state dir) | `core/playlist_sync/store.rs` | playlist links + match cache |
 | `qobuz_credentials.yml` (config dir) | `infra/qobuz/auth.rs` | the Qobuz login token (feature `qobuz`) |
+| `tidal_credentials.yml` (config dir) | `infra/tidal/auth.rs` | the Tidal OAuth tokens, user id, country code and the client ID that minted them; never the secret (feature `tidal`) |
 
 - All paths resolve through `core/paths.rs`, never `dirs::` directly.
 - `state.yml` saves are read-modify-write **sparse patches** so a second running

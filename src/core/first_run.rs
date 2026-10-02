@@ -159,13 +159,20 @@ pub(crate) fn compiled_in_sources() -> Vec<Source> {
   options.push(Source::Local);
   #[cfg(feature = "qobuz")]
   options.push(Source::Qobuz);
+  #[cfg(feature = "tidal")]
+  options.push(Source::Tidal);
   options
 }
 
 // `user_config` and `onboarding` are only read by credential/config-collecting
 // sources; a build with none of them (slim, or Qobuz alone) leaves them unused.
 #[cfg_attr(
-  not(any(feature = "subsonic", feature = "youtube", feature = "local-files")),
+  not(any(
+    feature = "subsonic",
+    feature = "youtube",
+    feature = "local-files",
+    feature = "tidal"
+  )),
   allow(unused_variables)
 )]
 async fn configure_source(
@@ -182,6 +189,8 @@ async fn configure_source(
     Source::Local => configure_local(user_config, onboarding),
     #[cfg(feature = "qobuz")]
     Source::Qobuz => configure_qobuz(onboarding).await?,
+    #[cfg(feature = "tidal")]
+    Source::Tidal => configure_tidal(user_config, onboarding).await,
     // Radio needs no setup; other sources are handled above when compiled in.
     _ => {}
   }
@@ -249,6 +258,60 @@ async fn configure_qobuz(onboarding: &dyn Onboarding) -> Result<()> {
     Err(e) => onboarding.info(&format!("failed: {e:#}")),
   }
   Ok(())
+}
+
+/// Log in to Tidal with the device flow and save the credentials file. A
+/// missing client ID or a failed login is not fatal: the app starts and the
+/// login runs again when Tidal is picked with `d`.
+#[cfg(feature = "tidal")]
+async fn configure_tidal(user_config: &UserConfig, onboarding: &dyn Onboarding) {
+  use crate::infra::tidal::{self, auth};
+
+  onboarding.info("\nTidal setup: spotatui logs in with a link.tidal.com code (a paid Tidal subscription is needed).");
+  let Some(client) = auth::client_credentials(&user_config.behavior) else {
+    onboarding.info(&format!(
+      "No Tidal client ID is configured. Set behavior.tidal_client_id (and tidal_client_secret) in {}, or SPOTATUI_TIDAL_CLIENT_ID / SPOTATUI_TIDAL_CLIENT_SECRET, then press `d` in the app and pick Tidal.",
+      config_file_path_display(user_config)
+    ));
+    return;
+  };
+  match tidal::restore_login(client.clone()).await {
+    Ok(_) => {
+      onboarding.info("Already logged in to Tidal.");
+      return;
+    }
+    Err(e) if auth::needs_login(&e) => {}
+    Err(e) => {
+      onboarding.info(&format!(
+        "The saved Tidal login could not be checked: {e:#}"
+      ));
+      onboarding.info("Press `d` in the app and pick Tidal to try again.");
+      return;
+    }
+  }
+
+  let login = match auth::DeviceLogin::start(client).await {
+    Ok(login) => login,
+    Err(e) => {
+      onboarding.info(&format!("Tidal login could not start: {e:#}"));
+      onboarding.info("Press `d` in the app and pick Tidal to try again.");
+      return;
+    }
+  };
+  let url = login.url().to_string();
+  onboarding.info("\nOpen this URL in your browser and approve the device:");
+  onboarding.info(&format!("{url}\n"));
+  if let Err(e) = open::that_detached(&url) {
+    onboarding.info(&format!("Failed to open browser automatically: {e}"));
+  }
+  onboarding.info("Waiting for the Tidal login (up to 5 minutes)...");
+  match tidal::finish_login(&login).await {
+    Ok(_) => onboarding.info("Logged in to Tidal."),
+    Err(e) => {
+      onboarding.info(&format!("Tidal login failed: {e:#}"));
+      onboarding.info("Press `d` in the app and pick Tidal to try again.");
+    }
+  }
 }
 
 #[cfg(feature = "subsonic")]

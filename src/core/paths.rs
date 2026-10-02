@@ -57,6 +57,12 @@ pub(crate) fn qobuz_credentials_path() -> Option<PathBuf> {
   app_config_dir().map(|dir| dir.join("qobuz_credentials.yml"))
 }
 
+/// The Tidal credentials file: `<config dir>/tidal_credentials.yml`.
+#[cfg(feature = "tidal")]
+pub(crate) fn tidal_credentials_path() -> Option<PathBuf> {
+  app_config_dir().map(|dir| dir.join("tidal_credentials.yml"))
+}
+
 /// Directory holding this run's log file.
 ///
 /// The OS temp directory rather than the state dir: a log file is written per

@@ -260,6 +260,9 @@ pub enum IoEvent {
   /// Start the in-TUI Qobuz browser login (handled by `infra::qobuz::dispatch`).
   #[cfg_attr(not(feature = "qobuz"), allow(dead_code))]
   QobuzLogin,
+  /// Make sure a Tidal login is in place: restore the saved one, else run the
+  /// device login (handled by `infra::tidal::dispatch`).
+  TidalLogin,
   /// Load the configured internet-radio stations into the sidebar (handled by
   /// `infra::radio::dispatch`; a no-op on the Spotify network).
   GetRadioStations,
@@ -577,6 +580,7 @@ impl Network {
         | IoEvent::GetQobuzTracks(_)
         | IoEvent::GetQobuzSearchResults(_)
         | IoEvent::QobuzLogin
+        | IoEvent::TidalLogin
         | IoEvent::GetRadioStations
         | IoEvent::GetRadioSearchResults(_)
         | IoEvent::GetYouTubeSearchResults(_)
@@ -1103,6 +1107,9 @@ impl Network {
       | IoEvent::GetQobuzTracks(_)
       | IoEvent::GetQobuzSearchResults(_)
       | IoEvent::QobuzLogin => {}
+      // The Tidal login is handled by infra::tidal::dispatch before reaching
+      // the network; it only arrives here when the feature is off.
+      IoEvent::TidalLogin => {}
       // Radio browse/search events are handled by infra::radio::dispatch before
       // reaching the network; they only arrive here when the feature is off.
       IoEvent::GetRadioStations | IoEvent::GetRadioSearchResults(_) => {}
