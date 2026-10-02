@@ -1017,7 +1017,7 @@ mod tests {
     );
     let (base, server) = serve(vec![Reply::new("200 OK", reply)]).await;
     let stream = source_at(&base)
-      .stream_source("77", manifest::REQUESTED_QUALITY)
+      .stream_source("77", manifest::HI_RES_QUALITY)
       .await
       .unwrap();
     assert!(
@@ -1097,9 +1097,13 @@ mod tests {
       let track = results.tracks.first().expect("a search hit");
       let uri = track.uri.as_deref().expect("a track URI");
       let started = std::time::Instant::now();
-      let prepared = dispatch::prepare_track(&source, track_id_from_uri(uri).unwrap())
-        .await
-        .expect("a playable stream");
+      let prepared = dispatch::prepare_track(
+        &source,
+        track_id_from_uri(uri).unwrap(),
+        manifest::HI_RES_QUALITY,
+      )
+      .await
+      .expect("a playable stream");
       println!(
         "{}: {} in {:?}",
         track.name,

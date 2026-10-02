@@ -103,6 +103,13 @@ impl App {
               crate::core::user_config::qobuz_quality_from_label(v);
           }
         }
+        #[cfg(feature = "tidal")]
+        "behavior.tidal_quality" => {
+          if let SettingValue::Cycle(v, _) = &setting.value {
+            self.user_config.behavior.tidal_quality =
+              crate::core::user_config::tidal_quality_from_label(v);
+          }
+        }
         "behavior.playback_poll_seconds" => {
           if let SettingValue::Number(v) = &setting.value {
             self.user_config.behavior.playback_poll_seconds = (*v).max(1) as u64;
@@ -909,6 +916,21 @@ mod tests {
     )];
     app.apply_settings_changes();
     assert_eq!(app.user_config.behavior.like_animation_frames, 1);
+  }
+
+  #[cfg(feature = "tidal")]
+  #[test]
+  fn saving_the_tidal_quality_row_stores_the_api_value() {
+    let mut app = make_app_simple();
+    app.settings_items = vec![setting(
+      "behavior.tidal_quality",
+      SettingValue::Cycle(
+        "AAC 96".into(),
+        crate::core::user_config::TIDAL_QUALITY_LABELS,
+      ),
+    )];
+    app.apply_settings_changes();
+    assert_eq!(app.user_config.behavior.tidal_quality, "LOW");
   }
 
   #[test]

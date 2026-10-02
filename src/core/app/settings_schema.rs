@@ -213,6 +213,18 @@ impl App {
             crate::core::user_config::QOBUZ_QUALITY_LABELS,
           ),
         },
+        #[cfg(feature = "tidal")]
+        SettingItem {
+          id: "behavior.tidal_quality".to_string(),
+          name: "Tidal Quality".to_string(),
+          description: "Stream quality for Tidal tracks (hi-res FLAC only where a master exists)"
+            .to_string(),
+          value: SettingValue::Cycle(
+            crate::core::user_config::tidal_quality_label(self.user_config.behavior.tidal_quality)
+              .to_string(),
+            crate::core::user_config::TIDAL_QUALITY_LABELS,
+          ),
+        },
         SettingItem {
           id: "behavior.playback_poll_seconds".to_string(),
           name: "Playback Poll Seconds".to_string(),

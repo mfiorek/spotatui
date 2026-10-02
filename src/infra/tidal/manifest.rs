@@ -14,9 +14,10 @@ use serde::Deserialize;
 
 use super::dash::FlacFormat;
 
-/// The tier asked for: DASH FLAC for a track with a hi-res master, HIGH AAC
-/// over BTS for any other (this client type never gets LOSSLESS over BTS).
-pub const REQUESTED_QUALITY: &str = "HI_RES_LOSSLESS";
+/// The hi-res tier: DASH FLAC for a track with a hi-res master, HIGH AAC over
+/// BTS for any other (this client type never gets LOSSLESS over BTS). The
+/// default of `behavior.tidal_quality`, whose values are the API's tiers.
+pub const HI_RES_QUALITY: &str = "HI_RES_LOSSLESS";
 /// The tier asked for when the hi-res stream cannot be played: always BTS.
 pub const FALLBACK_QUALITY: &str = "HIGH";
 
@@ -162,6 +163,13 @@ mod tests {
   }
 
   const BTS: &str = "application/vnd.tidal.bts";
+
+  #[test]
+  fn the_hi_res_and_fallback_tiers_are_quality_settings() {
+    let settings = crate::core::user_config::TIDAL_QUALITY_IDS;
+    assert_eq!(settings[0], HI_RES_QUALITY, "the default is hi-res");
+    assert!(settings.contains(&FALLBACK_QUALITY));
+  }
 
   #[test]
   fn a_bts_manifest_yields_its_first_url_and_mime_type() {

@@ -397,12 +397,13 @@ async fn play_queued_tidal(app: &Arc<Mutex<App>>, track: &TrackInfo, uri: &str) 
     return false;
   };
   let fetch_id = publish_pending_decoded(app, &player, track).await;
+  let quality = app.lock().await.user_config.behavior.tidal_quality;
   // Fetch off the IoEvent pump, like Qobuz: a Tidal track is a long download.
   let app = Arc::clone(app);
   let uri = uri.to_string();
   let name = track.name.clone();
   tokio::spawn(async move {
-    let result = crate::infra::tidal::dispatch::download_for_queue(&source, &uri)
+    let result = crate::infra::tidal::dispatch::download_for_queue(&source, &uri, quality)
       .await
       .map(|(tmp, label)| (tmp, Some(label)));
     finish_decoded_fetch(&app, fetch_id, result, &name).await;

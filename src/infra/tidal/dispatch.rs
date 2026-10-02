@@ -16,7 +16,9 @@
 //! window supersedes it through `fetch_id`; the superseded reader is dropped,
 //! which cancels its download. Repeat-one replays the tempfile only when the
 //! download completed (a forward seek can leave a gap that was never filled);
-//! otherwise it fetches the track again.
+//! otherwise it fetches the track again. Each fetch reads
+//! `behavior.tidal_quality` when it starts, so a changed setting applies from
+//! the next track.
 //!
 //! The native queue suspends a Tidal session like any other decoded one: it
 //! aborts the fetch in flight and borrows the session's player, and a fetch
@@ -358,30 +360,38 @@ pub(super) struct PreparedTrack {
   stream: PreparedStream,
 }
 
-/// Ask for the track in hi-res and run `step` on the stream. A hi-res (DASH)
-/// stream whose step fails is asked for again as HIGH, which always comes
-/// over BTS.
-async fn with_fallback<T, F, Fut>(source: &TidalSource, track_id: &str, step: F) -> Result<T>
+/// The tier to ask for when a stream requested at `requested` fails to open:
+/// HIGH (always BTS) after a hi-res request that came back as DASH, nothing
+/// otherwise.
+fn fallback_quality(requested: &str, kind: &StreamKind) -> Option<&'static str> {
+  (requested == manifest::HI_RES_QUALITY && matches!(kind, StreamKind::Dash { .. }))
+    .then_some(manifest::FALLBACK_QUALITY)
+}
+
+/// Ask for the track at `quality` (`behavior.tidal_quality`) and run `step`
+/// on the stream. A hi-res (DASH) stream whose step fails is asked for again
+/// as HIGH, which always comes over BTS.
+async fn with_fallback<T, F, Fut>(
+  source: &TidalSource,
+  track_id: &str,
+  quality: &str,
+  step: F,
+) -> Result<T>
 where
   F: Fn(StreamSource) -> Fut,
   Fut: std::future::Future<Output = Result<T>>,
 {
-  let stream_source = source
-    .stream_source(track_id, manifest::REQUESTED_QUALITY)
-    .await?;
-  if !matches!(stream_source.kind, StreamKind::Dash { .. }) {
+  let stream_source = source.stream_source(track_id, quality).await?;
+  let Some(fallback) = fallback_quality(quality, &stream_source.kind) else {
     return step(stream_source).await;
-  }
+  };
   match step(stream_source).await {
     Ok(done) => Ok(done),
     Err(e) => {
       log::warn!(
-        "[tidal] track {track_id}: the hi-res stream failed ({e:#}); asking for {}",
-        manifest::FALLBACK_QUALITY
+        "[tidal] track {track_id}: the hi-res stream failed ({e:#}); asking for {fallback}"
       );
-      let fallback = source
-        .stream_source(track_id, manifest::FALLBACK_QUALITY)
-        .await?;
+      let fallback = source.stream_source(track_id, fallback).await?;
       step(fallback).await
     }
   }
@@ -389,8 +399,12 @@ where
 
 /// Open the track's download into a fresh tempfile and build its decoder,
 /// whose first read waits for the prefetch.
-pub(super) async fn prepare_track(source: &TidalSource, track_id: &str) -> Result<PreparedTrack> {
-  with_fallback(source, track_id, |stream_source| {
+pub(super) async fn prepare_track(
+  source: &TidalSource,
+  track_id: &str,
+  quality: &str,
+) -> Result<PreparedTrack> {
+  with_fallback(source, track_id, quality, |stream_source| {
     prepare_source(track_id, stream_source)
   })
   .await
@@ -402,9 +416,10 @@ pub(super) async fn prepare_track(source: &TidalSource, track_id: &str) -> Resul
 pub(crate) async fn download_for_queue(
   source: &TidalSource,
   uri: &str,
+  quality: &str,
 ) -> Result<(NamedTempFile, String)> {
   let track_id = track_id_from_uri(uri)?;
-  let (tempfile, delivered) = with_fallback(source, track_id, |stream_source| {
+  let (tempfile, delivered) = with_fallback(source, track_id, quality, |stream_source| {
     download_source(track_id, stream_source)
   })
   .await?;
@@ -502,12 +517,17 @@ async fn download_source(
 /// for it: a skip, a new queue or a teardown cancels the task, and a decoder
 /// build already in progress ends on its own and drops its reader, which
 /// cancels that download.
-fn spawn_fetch(app: &Arc<Mutex<App>>, session: &mut TidalPlaybackState, track_id: String) {
+fn spawn_fetch(
+  app: &Arc<Mutex<App>>,
+  session: &mut TidalPlaybackState,
+  track_id: String,
+  quality: &'static str,
+) {
   let app = Arc::clone(app);
   let source = Arc::clone(&session.source);
   let fetch_id = session.fetch_id;
   let task = tokio::spawn(async move {
-    match prepare_track(&source, &track_id).await {
+    match prepare_track(&source, &track_id, quality).await {
       Ok(prepared) => commit_fetch(&app, fetch_id, prepared).await,
       Err(e) => fail_fetch(&app, fetch_id, "stream", e).await,
     }
@@ -714,7 +734,8 @@ pub(crate) async fn start_tidal_queue(
   if guard.decoded_shuffle {
     state.set_shuffle(true);
   }
-  spawn_fetch(app, &mut state, track_id);
+  let quality = guard.user_config.behavior.tidal_quality;
+  spawn_fetch(app, &mut state, track_id, quality);
   // Dropping a previous session aborts its download.
   guard.set_tidal_playback(Some(state));
 }
@@ -804,6 +825,7 @@ async fn replay_current(app: &Arc<Mutex<App>>) -> bool {
 /// the last two pass how the track starts as `resume`.
 pub(crate) async fn play_index(app: &Arc<Mutex<App>>, target: usize, resume: Option<ResumePoint>) {
   let mut guard = app.lock().await;
+  let quality = guard.user_config.behavior.tidal_quality;
   let Some(s) = guard.tidal_playback_mut() else {
     return; // session torn down between dispatch and here
   };
@@ -832,7 +854,7 @@ pub(crate) async fn play_index(app: &Arc<Mutex<App>>, target: usize, resume: Opt
   s.index = target;
   s.advancing = true;
   s.fetch_id = next_fetch_id();
-  spawn_fetch(app, s, track_id);
+  spawn_fetch(app, s, track_id, quality);
 }
 
 /// End the Tidal session, releasing the output device and the tempfile. The
@@ -955,6 +977,35 @@ async fn run_login(app: &Arc<Mutex<App>>, client: ClientCredentials) {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn dash() -> StreamKind {
+    StreamKind::Dash { mpd: String::new() }
+  }
+
+  fn bts() -> StreamKind {
+    StreamKind::Bts {
+      url: String::new(),
+      mime_type: None,
+    }
+  }
+
+  #[test]
+  fn a_hi_res_dash_stream_falls_back_to_high() {
+    assert_eq!(fallback_quality("HI_RES_LOSSLESS", &dash()), Some("HIGH"));
+  }
+
+  #[test]
+  fn a_hi_res_request_answered_over_bts_has_no_fallback() {
+    assert_eq!(fallback_quality("HI_RES_LOSSLESS", &bts()), None);
+  }
+
+  #[test]
+  fn an_aac_request_never_falls_back() {
+    for quality in ["HIGH", "LOW"] {
+      assert_eq!(fallback_quality(quality, &bts()), None, "{quality}");
+      assert_eq!(fallback_quality(quality, &dash()), None, "{quality}");
+    }
+  }
 
   #[test]
   fn a_repeated_login_request_shows_the_url_for_the_time_left() {

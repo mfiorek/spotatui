@@ -101,6 +101,46 @@ fn qobuz_quality_or_default(quality: u8) -> u8 {
   }
 }
 
+/// The Tidal `audioquality` values, in the order of [`TIDAL_QUALITY_LABELS`].
+/// LOSSLESS is left out: this client type gets it as AAC 320 anyway.
+#[cfg_attr(not(feature = "tidal"), allow(dead_code))]
+pub const TIDAL_QUALITY_IDS: [&str; 3] = ["HI_RES_LOSSLESS", "HIGH", "LOW"];
+/// Settings-screen labels for the Tidal qualities, in [`TIDAL_QUALITY_IDS`] order.
+#[cfg_attr(not(feature = "tidal"), allow(dead_code))]
+pub const TIDAL_QUALITY_LABELS: &[&str] = &["Hi-res FLAC (else AAC 320)", "AAC 320", "AAC 96"];
+/// The default quality (HI_RES_LOSSLESS) as an index into both tables.
+const TIDAL_QUALITY_DEFAULT_INDEX: usize = 0;
+const TIDAL_QUALITY_DEFAULT: &str = TIDAL_QUALITY_IDS[TIDAL_QUALITY_DEFAULT_INDEX];
+
+/// The settings label of a Tidal quality (unknown values read as the default).
+#[cfg_attr(not(feature = "tidal"), allow(dead_code))]
+pub fn tidal_quality_label(quality: &str) -> &'static str {
+  let index = TIDAL_QUALITY_IDS
+    .iter()
+    .position(|&id| id == quality)
+    .unwrap_or(TIDAL_QUALITY_DEFAULT_INDEX);
+  TIDAL_QUALITY_LABELS[index]
+}
+
+/// The Tidal quality behind a settings label (unknown labels read as the default).
+#[cfg_attr(not(feature = "tidal"), allow(dead_code))]
+pub fn tidal_quality_from_label(label: &str) -> &'static str {
+  let index = TIDAL_QUALITY_LABELS
+    .iter()
+    .position(|&l| l == label)
+    .unwrap_or(TIDAL_QUALITY_DEFAULT_INDEX);
+  TIDAL_QUALITY_IDS[index]
+}
+
+/// A configured Tidal quality, or the default for an unknown value.
+fn tidal_quality_or_default(quality: &str) -> &'static str {
+  TIDAL_QUALITY_IDS
+    .iter()
+    .find(|&&id| id == quality)
+    .copied()
+    .unwrap_or(TIDAL_QUALITY_DEFAULT)
+}
+
 /// Parse a human-readable update delay into seconds.
 /// Accepts: "0", "30s", "10m", "2h", "7d", or a bare second count.
 pub fn parse_update_delay_secs(value: &str) -> Result<u64, String> {
@@ -598,6 +638,7 @@ pub struct BehaviorConfigString {
   pub subsonic_password: Option<String>,
   pub ytdlp_path: Option<String>,
   pub qobuz_quality: Option<u8>,
+  pub tidal_quality: Option<String>,
   pub tidal_client_id: Option<String>,
   pub tidal_client_secret: Option<String>,
   #[serde(skip_serializing_if = "Option::is_none")]
@@ -790,6 +831,10 @@ pub struct BehaviorConfig {
   /// Qobuz stream quality: 5 (MP3 320), 6 (FLAC 16/44.1), 7 (FLAC 24/96),
   /// 27 (FLAC 24/192). Default 6.
   pub qobuz_quality: u8,
+  /// Tidal stream quality, as the API spells it: HI_RES_LOSSLESS (default;
+  /// hi-res FLAC for a track with a hi-res master, AAC 320 otherwise), HIGH
+  /// (AAC 320) or LOW (AAC 96). Always one of [`TIDAL_QUALITY_IDS`].
+  pub tidal_quality: &'static str,
   /// OAuth client ID for the Tidal device login. Never embedded in the
   /// source: set it here or through `SPOTATUI_TIDAL_CLIENT_ID`, which takes
   /// precedence. `None` until configured.
@@ -1194,6 +1239,7 @@ impl UserConfig {
         subsonic_password: None,
         ytdlp_path: None,
         qobuz_quality: QOBUZ_QUALITY_DEFAULT,
+        tidal_quality: TIDAL_QUALITY_DEFAULT,
         tidal_client_id: None,
         tidal_client_secret: None,
         radio_stations: Vec::new(),
@@ -1779,6 +1825,9 @@ impl UserConfig {
     if let Some(qobuz_quality) = behavior_config.qobuz_quality {
       self.behavior.qobuz_quality = qobuz_quality_or_default(qobuz_quality);
     }
+    if let Some(tidal_quality) = trim_to_none(behavior_config.tidal_quality) {
+      self.behavior.tidal_quality = tidal_quality_or_default(&tidal_quality);
+    }
     if let Some(tidal_client_id) = trim_to_none(behavior_config.tidal_client_id) {
       self.behavior.tidal_client_id = Some(tidal_client_id);
     }
@@ -2219,6 +2268,7 @@ impl UserConfig {
       subsonic_password: self.behavior.subsonic_password.clone(),
       ytdlp_path: self.behavior.ytdlp_path.clone(),
       qobuz_quality: Some(self.behavior.qobuz_quality),
+      tidal_quality: Some(self.behavior.tidal_quality.to_string()),
       tidal_client_id: self.behavior.tidal_client_id.clone(),
       tidal_client_secret: self.behavior.tidal_client_secret.clone(),
       radio_stations: if self.behavior.radio_stations.is_empty() {
@@ -3767,5 +3817,52 @@ playbar_control_labels:
       ])
     )
     .is_ok());
+  }
+
+  #[test]
+  fn tidal_quality_loads_falls_back_to_hi_res_and_round_trips() {
+    use super::{BehaviorConfigString, UserConfig, UserConfigPaths, UserConfigString};
+    let mut config = UserConfig::new();
+    assert_eq!(config.behavior.tidal_quality, "HI_RES_LOSSLESS");
+
+    let low: BehaviorConfigString = serde_yaml::from_str("tidal_quality: ' LOW '").unwrap();
+    config.load_behaviorconfig(low).unwrap();
+    assert_eq!(config.behavior.tidal_quality, "LOW");
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.yml");
+    config.path_to_config = Some(UserConfigPaths {
+      config_file_path: path.clone(),
+    });
+    config.save_config().unwrap();
+    let saved: UserConfigString =
+      serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(
+      saved.behavior.unwrap().tidal_quality.as_deref(),
+      Some("LOW")
+    );
+
+    for unknown in ["LOSSLESS", "hi_res_lossless", "MAX"] {
+      let behavior: BehaviorConfigString =
+        serde_yaml::from_str(&format!("tidal_quality: {unknown}")).unwrap();
+      config.load_behaviorconfig(behavior).unwrap();
+      assert_eq!(
+        config.behavior.tidal_quality, "HI_RES_LOSSLESS",
+        "{unknown}"
+      );
+    }
+  }
+
+  #[test]
+  fn every_tidal_quality_label_maps_back_to_its_value() {
+    use super::{
+      tidal_quality_from_label, tidal_quality_label, TIDAL_QUALITY_IDS, TIDAL_QUALITY_LABELS,
+    };
+    assert_eq!(TIDAL_QUALITY_IDS.len(), TIDAL_QUALITY_LABELS.len());
+    for id in TIDAL_QUALITY_IDS {
+      assert_eq!(tidal_quality_from_label(tidal_quality_label(id)), id);
+    }
+    assert_eq!(tidal_quality_label("LOSSLESS"), TIDAL_QUALITY_LABELS[0]);
+    assert_eq!(tidal_quality_from_label("FLAC 16/44.1"), "HI_RES_LOSSLESS");
   }
 }

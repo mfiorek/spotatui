@@ -19,9 +19,12 @@
   dispatches `TidalLogin`, whose success reloads the sidebar. Ids go into
   request paths unescaped, so `listing_from_uri` admits only uuid characters.
 - Playback (`dispatch.rs`, after Qobuz's) asks `playbackinfopostpaywall` for
-  HI_RES_LOSSLESS (`manifest.rs`, pure). A track with a hi-res master comes
-  back as unencrypted MPEG-DASH FLAC; any other comes back as HIGH over BTS:
-  one direct, unencrypted CDN URL, AAC in a plain (not fragmented) MP4.
+  the `behavior.tidal_quality` tier, read when each fetch starts:
+  HI_RES_LOSSLESS (the default), HIGH or LOW (`manifest.rs`, pure). LOSSLESS
+  is not offered: this client type gets it as HIGH. A hi-res request for a
+  track with a hi-res master comes back as unencrypted MPEG-DASH FLAC; any
+  other comes back over BTS: one direct, unencrypted CDN URL, AAC in a plain
+  (not fragmented) MP4.
   Either way the track plays while it downloads into the session's tempfile
   through the shared `infra/progressive.rs`.
   - BTS: `stream.rs` runs a `stream-download` `HttpStream` (Range requests on
@@ -36,7 +39,8 @@
     FLAC header and each segment's `mdat` payload: a raw FLAC file the FLAC
     demuxer seeks in. A payload whose size differs from the measured one is
     an error, since every later offset depends on it.
-  - A DASH stream that fails to open is asked for again as HIGH (BTS). The
+  - A DASH stream that fails to open is asked for again as HIGH (BTS); only
+    a hi-res request falls back (`fallback_quality`). The
     playbar shows what was delivered: `FLAC 24/48` read from STREAMINFO, or
     `AAC 320`.
   - Errors never print a URL: its query carries the CDN token.
