@@ -157,7 +157,7 @@ impl Source {
   pub fn supports_playlist_sync(&self) -> bool {
     matches!(
       self,
-      Source::Spotify | Source::Subsonic | Source::YouTube | Source::Qobuz
+      Source::Spotify | Source::Subsonic | Source::YouTube | Source::Qobuz | Source::Tidal
     )
   }
 }
@@ -241,11 +241,12 @@ mod tests {
   }
 
   #[test]
-  fn playlist_sync_is_on_for_the_four_writable_sources() {
+  fn playlist_sync_is_on_for_the_five_writable_sources() {
     assert!(Source::Spotify.supports_playlist_sync());
     assert!(Source::Subsonic.supports_playlist_sync());
     assert!(Source::YouTube.supports_playlist_sync());
     assert!(Source::Qobuz.supports_playlist_sync());
+    assert!(Source::Tidal.supports_playlist_sync());
     assert!(!Source::Local.supports_playlist_sync());
     assert!(!Source::Radio.supports_playlist_sync());
   }

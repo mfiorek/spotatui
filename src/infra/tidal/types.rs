@@ -93,6 +93,26 @@ pub struct Track {
   /// Absent on some nested listings; the caller supplies a fallback.
   #[serde(default)]
   pub album: Option<Album>,
+  /// What playlist sync matches tracks by across sources.
+  #[serde(default)]
+  pub isrc: Option<String>,
+}
+
+/// One row of `playlists/<uuid>/items`: a track or a video. Item indices
+/// count both.
+#[derive(Debug, Default, Deserialize)]
+pub struct PlaylistEntry {
+  #[serde(default)]
+  pub item: Track,
+  #[serde(default, rename = "type")]
+  pub kind: String,
+}
+
+/// The `{ data }` reply of the v2 create-playlist call.
+#[derive(Debug, Deserialize)]
+pub struct CreatedPlaylist {
+  #[serde(default)]
+  pub data: Option<Playlist>,
 }
 
 /// The playlist creator; `id` 0 for editorial playlists.

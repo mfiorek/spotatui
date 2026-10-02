@@ -187,7 +187,7 @@ mod tests {
     );
     assert_eq!(
       availability(sync, Source::Tidal, false),
-      Availability::NotForSource(Source::Tidal)
+      Availability::Available
     );
     assert_eq!(
       availability(sync, Source::Local, true),

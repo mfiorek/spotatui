@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, Method, StatusCode};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use tokio::sync::Mutex;
@@ -18,6 +18,8 @@ use tokio::sync::Mutex;
 use super::auth::{self, AuthEndpoints, ClientCredentials, TidalCredentials};
 
 const API_BASE: &str = "https://api.tidal.com/v1";
+/// Playlist creation lives on the v2 API only.
+const API_V2_BASE: &str = "https://api.tidal.com/v2";
 /// The private API is only exercised by official clients; this is the version
 /// header python-tidal sends.
 const CLIENT_VERSION: &str = "2025.7.16";
@@ -30,6 +32,7 @@ const RATE_LIMIT_UNIT: Duration = Duration::from_secs(1);
 pub struct TidalClient {
   http: Client,
   api_base: String,
+  api_v2_base: String,
   endpoints: AuthEndpoints,
   client: ClientCredentials,
   credentials: Mutex<TidalCredentials>,
@@ -51,6 +54,7 @@ impl TidalClient {
     TidalClient {
       http: super::shared_tidal_client(),
       api_base: API_BASE.to_string(),
+      api_v2_base: API_V2_BASE.to_string(),
       endpoints: AuthEndpoints::default(),
       client,
       credentials: Mutex::new(credentials),
@@ -65,6 +69,7 @@ impl TidalClient {
     TidalClient {
       http: Client::new(),
       api_base: format!("{base}/v1"),
+      api_v2_base: format!("{base}/v2"),
       endpoints: AuthEndpoints::at(format!("{base}/oauth2")),
       rate_limit_unit: Duration::from_millis(1),
       ..TidalClient::new(client, credentials, None)
@@ -128,21 +133,36 @@ impl TidalClient {
     ))
   }
 
-  /// GET `path` (relative to `/v1/`) and decode the JSON reply. The country
-  /// code and session id ride along when known. A 401 forces one refresh and
-  /// a retry; a second 401 asks for a new login. A 429 is retried
-  /// [`RATE_LIMIT_RETRIES`] times after the server's backoff.
+  /// GET `path` (relative to `/v1/`) and decode the JSON reply.
   pub(super) async fn get_json<T: DeserializeOwned>(
     &self,
     path: &str,
     params: &[(&str, String)],
   ) -> Result<T> {
-    let url = format!("{}/{path}", self.api_base);
+    self.send_json(&Call::get(path, params)).await
+  }
+
+  /// Send `call` and decode the JSON reply.
+  pub(super) async fn send_json<T: DeserializeOwned>(&self, call: &Call<'_>) -> Result<T> {
+    let reply = self.send(call).await?;
+    serde_json::from_str(&reply.body).with_context(|| format!("{} decode", call.path))
+  }
+
+  /// Send `call`. The country code and session id ride along when known. A
+  /// 401 forces one refresh and a retry; a second 401 asks for a new login. A
+  /// 429 is retried [`RATE_LIMIT_RETRIES`] times after the server's backoff.
+  pub(super) async fn send(&self, call: &Call<'_>) -> Result<ApiReply> {
+    let path = call.path;
+    let base = match call.api {
+      Api::V1 => &self.api_base,
+      Api::V2 => &self.api_v2_base,
+    };
+    let url = format!("{base}/{path}");
     let mut stale: Option<String> = None;
     let mut rate_limited = 0;
     loop {
       let (token, authorization) = self.authorization(stale.as_deref()).await?;
-      let mut query: Vec<(&str, String)> = params.to_vec();
+      let mut query: Vec<(&str, String)> = call.params.to_vec();
       let country_code = self.credentials.lock().await.country_code.clone();
       if !country_code.is_empty() {
         query.push(("countryCode", country_code));
@@ -150,13 +170,20 @@ impl TidalClient {
       if let Some(session_id) = self.session_id.lock().ok().and_then(|s| s.clone()) {
         query.push(("sessionId", session_id));
       }
-      let response = self
+      let mut request = self
         .http
-        .get(&url)
+        .request(call.method.clone(), &url)
         .query(&query)
         .header(reqwest::header::USER_AGENT, super::USER_AGENT)
         .header("x-tidal-client-version", CLIENT_VERSION)
-        .header(reqwest::header::AUTHORIZATION, authorization)
+        .header(reqwest::header::AUTHORIZATION, authorization);
+      if !call.form.is_empty() {
+        request = request.form(call.form);
+      }
+      if let Some(etag) = call.if_none_match {
+        request = request.header(reqwest::header::IF_NONE_MATCH, etag);
+      }
+      let response = request
         .send()
         .await
         .map_err(reqwest::Error::without_url)
@@ -180,6 +207,11 @@ impl TidalClient {
         tokio::time::sleep(delay).await;
         continue;
       }
+      let etag = response
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
       let body = response
         .text()
         .await
@@ -189,7 +221,7 @@ impl TidalClient {
         let excerpt: String = body.chars().take(120).collect();
         return Err(anyhow!("{path} returned HTTP {status}: {excerpt}"));
       }
-      return serde_json::from_str(&body).with_context(|| format!("{path} decode"));
+      return Ok(ApiReply { etag, body });
     }
   }
 
@@ -214,6 +246,46 @@ impl TidalClient {
     self.save(&credentials);
     Ok(())
   }
+}
+
+/// Which API generation a call goes to.
+#[derive(Clone, Copy)]
+pub(super) enum Api {
+  V1,
+  V2,
+}
+
+/// One API call: what varies between requests.
+pub(super) struct Call<'a> {
+  pub api: Api,
+  pub method: Method,
+  /// Relative to the API's base.
+  pub path: &'a str,
+  pub params: &'a [(&'a str, String)],
+  /// A form body, sent when not empty.
+  pub form: &'a [(&'a str, String)],
+  /// The `ETag` a playlist write is conditioned on.
+  pub if_none_match: Option<&'a str>,
+}
+
+impl<'a> Call<'a> {
+  /// A v1 GET.
+  pub fn get(path: &'a str, params: &'a [(&'a str, String)]) -> Self {
+    Call {
+      api: Api::V1,
+      method: Method::GET,
+      path,
+      params,
+      form: &[],
+      if_none_match: None,
+    }
+  }
+}
+
+/// A successful reply.
+pub(super) struct ApiReply {
+  pub etag: Option<String>,
+  pub body: String,
 }
 
 /// The backoff before retry `attempt` of a 429: the server's `Retry-After`

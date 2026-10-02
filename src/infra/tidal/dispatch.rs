@@ -236,6 +236,21 @@ pub(crate) async fn build_playback_source(app: &Arc<Mutex<App>>) -> Option<Tidal
   build_source(app, WhenLoggedOut::Message).await
 }
 
+/// A source for a playlist-sync run, which never starts a device login: it
+/// can run from the CLI, where nothing would show the link.
+pub(crate) async fn build_sync_source(app: &Arc<Mutex<App>>) -> Result<TidalSource> {
+  let client = auth::client_credentials(&app.lock().await.user_config.behavior)
+    .ok_or_else(|| anyhow::anyhow!(auth::NO_CLIENT_ID))?;
+  if let Some(login) = super::current_login().filter(|login| login.client_id() == client.id) {
+    return Ok(TidalSource::new(login));
+  }
+  match super::restore_login(client).await {
+    Ok(login) => Ok(TidalSource::new(login)),
+    Err(e) if auth::needs_login(&e) => Err(anyhow::anyhow!("Tidal is not logged in")),
+    Err(e) => Err(e.context("Tidal login")),
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Browse + search
 // ---------------------------------------------------------------------------

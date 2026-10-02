@@ -96,9 +96,9 @@ export function LibraryHealth({
               <>
                 <p>No linked playlists.</p>
                 <p>
-                  A build with Qobuz, Subsonic or YouTube can mirror a playlist:
-                  quit this window, highlight the playlist in the terminal and
-                  press m.
+                  A build with Qobuz, Subsonic, Tidal or YouTube can mirror a
+                  playlist: quit this window, highlight the playlist in the
+                  terminal and press m.
                 </p>
                 {sync?.last_failed && sync.last_summary && (
                   <p className="failed">{sync.last_summary}</p>

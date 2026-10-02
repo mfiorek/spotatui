@@ -484,10 +484,14 @@ impl App {
         .qobuz_playlists
         .get(index)
         .filter(|playlist| playlist.uri.starts_with("qobuz:playlist:"))?,
+      // Likewise Tidal's; a followed playlist can be a master, never a mirror.
+      Source::Tidal => self
+        .tidal_playlists
+        .get(index)
+        .filter(|playlist| playlist.uri.starts_with("tidal:playlist:"))?,
       Source::Subsonic => self.subsonic_playlists.get(index)?,
       Source::YouTube => self.youtube_playlists.get(index)?,
-      // Tidal playlists cannot be synced yet.
-      Source::Local | Source::Radio | Source::Tidal => return None,
+      Source::Local | Source::Radio => return None,
     };
     Some(crate::core::playlist_sync::Endpoint {
       source: self.active_source,

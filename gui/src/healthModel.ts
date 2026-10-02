@@ -7,6 +7,7 @@ export const SYNC_SOURCES: Source[] = [
   "Qobuz",
   "Subsonic",
   "Spotify",
+  "Tidal",
   "YouTube",
 ];
 

@@ -48,9 +48,16 @@ describe("LibraryHealth", () => {
     expect(html).toContain("Sync all now");
   });
 
+  it("has a column for every source a playlist can sync to", () => {
+    const html = render(sync);
+    for (const source of ["QOBUZ", "SUBSONIC", "SPOTIFY", "TIDAL", "YOUTUBE"]) {
+      expect(html).toContain(`<span>${source}</span>`);
+    }
+  });
+
   it("says which build can link when there are no links", () => {
     expect(render({ ...sync, links: [] })).toContain(
-      "A build with Qobuz, Subsonic or YouTube can mirror a playlist",
+      "A build with Qobuz, Subsonic, Tidal or YouTube can mirror a playlist",
     );
     expect(render({ ...sync, links: [], running: true })).toContain(
       "Loading the linked playlists…",

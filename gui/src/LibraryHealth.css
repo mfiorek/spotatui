@@ -82,7 +82,7 @@
 
 .link-row {
   display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) repeat(4, 104px) 124px;
+  grid-template-columns: 28px minmax(0, 1fr) repeat(5, 104px) 124px;
   column-gap: 6px;
   align-items: center;
   height: 33px;
@@ -262,7 +262,7 @@
   }
 
   .link-row {
-    grid-template-columns: 28px minmax(0, 1fr) repeat(4, 80px);
+    grid-template-columns: 28px minmax(0, 1fr) repeat(5, 80px);
   }
 
   .link-row .when {

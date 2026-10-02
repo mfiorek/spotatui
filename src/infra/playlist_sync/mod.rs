@@ -1,6 +1,6 @@
 //! Cross-source playlist sync: opening a client per endpoint and running the
 //! engine's plan against it. Compiled unconditionally; the Spotify arm is always
-//! present and the other three follow their source's feature, so a slim build
+//! present and the other four follow their source's feature, so a slim build
 //! reduces to Spotify-to-Spotify links.
 
 mod run;
@@ -21,7 +21,7 @@ use crate::core::source::Source;
 use crate::infra::network::IoEvent;
 
 /// Candidates asked of a mirror's catalog for one master track.
-#[cfg(any(feature = "qobuz", feature = "subsonic"))]
+#[cfg(any(feature = "qobuz", feature = "subsonic", feature = "tidal"))]
 const CANDIDATE_LIMIT: u32 = 10;
 
 /// Everything a run needs from boot in order to open clients.
@@ -113,11 +113,13 @@ impl SyncClients for SyncContext {
   }
 }
 
-/// The one client type a run uses; the three optional arms follow their source's feature.
+/// The one client type a run uses; the optional arms follow their source's feature.
 pub(crate) enum SourceClient {
   Spotify(Box<spotify::SpotifyClient>),
   #[cfg(feature = "qobuz")]
   Qobuz(crate::infra::qobuz::QobuzSource),
+  #[cfg(feature = "tidal")]
+  Tidal(crate::infra::tidal::TidalSource),
   #[cfg(feature = "subsonic")]
   Subsonic(crate::infra::subsonic::SubsonicSource),
   #[cfg(feature = "youtube")]
@@ -134,6 +136,9 @@ impl SyncClient for SourceClient {
         "qobuz:playlist:",
         name,
       )),
+      // The sidebar lists followed playlists too, which cannot be written.
+      #[cfg(feature = "tidal")]
+      SourceClient::Tidal(source) => source.own_playlist_named(name).await,
       #[cfg(feature = "subsonic")]
       SourceClient::Subsonic(source) => Ok(named_playlist(
         &crate::core::source::MediaSource::playlists(source).await?,
@@ -153,6 +158,11 @@ impl SyncClient for SourceClient {
         "qobuz:playlist:{}",
         source.create_playlist(name).await?
       )),
+      #[cfg(feature = "tidal")]
+      SourceClient::Tidal(source) => Ok(format!(
+        "tidal:playlist:{}",
+        source.create_playlist(name).await?
+      )),
       #[cfg(feature = "subsonic")]
       SourceClient::Subsonic(source) => Ok(format!(
         "subsonic:playlist:{}",
@@ -168,6 +178,8 @@ impl SyncClient for SourceClient {
       SourceClient::Spotify(client) => client.read_playlist(playlist_uri).await,
       #[cfg(feature = "qobuz")]
       SourceClient::Qobuz(source) => Ok(source.sync_playlist_tracks(playlist_uri).await?.into()),
+      #[cfg(feature = "tidal")]
+      SourceClient::Tidal(source) => source.sync_playlist(playlist_uri).await,
       #[cfg(feature = "subsonic")]
       SourceClient::Subsonic(source) => Ok(source.sync_playlist_tracks(playlist_uri).await?.into()),
       #[cfg(feature = "youtube")]
@@ -180,6 +192,16 @@ impl SyncClient for SourceClient {
       SourceClient::Spotify(client) => client.resolve(target).await,
       #[cfg(feature = "qobuz")]
       SourceClient::Qobuz(source) => {
+        let found = source
+          .sync_search(&catalog_query(target), CANDIDATE_LIMIT)
+          .await?;
+        Ok(
+          crate::core::playlist_sync::pick_candidate(target, &found)
+            .map(|index| found[index].clone()),
+        )
+      }
+      #[cfg(feature = "tidal")]
+      SourceClient::Tidal(source) => {
         let found = source
           .sync_search(&catalog_query(target), CANDIDATE_LIMIT)
           .await?;
@@ -211,6 +233,11 @@ impl SyncClient for SourceClient {
         crate::core::source::PlaylistWriter::add_tracks(source, playlist_uri, &keys_of(tracks))
           .await
       }
+      #[cfg(feature = "tidal")]
+      SourceClient::Tidal(source) => {
+        crate::core::source::PlaylistWriter::add_tracks(source, playlist_uri, &keys_of(tracks))
+          .await
+      }
       #[cfg(feature = "subsonic")]
       SourceClient::Subsonic(source) => {
         crate::core::source::PlaylistWriter::add_tracks(source, playlist_uri, &keys_of(tracks))
@@ -226,6 +253,10 @@ impl SyncClient for SourceClient {
       SourceClient::Spotify(client) => client.remove(playlist_uri, keys).await,
       #[cfg(feature = "qobuz")]
       SourceClient::Qobuz(source) => {
+        crate::core::source::PlaylistWriter::remove_tracks(source, playlist_uri, keys).await
+      }
+      #[cfg(feature = "tidal")]
+      SourceClient::Tidal(source) => {
         crate::core::source::PlaylistWriter::remove_tracks(source, playlist_uri, keys).await
       }
       #[cfg(feature = "subsonic")]
@@ -257,7 +288,12 @@ fn named_playlist(
 }
 
 /// The query a catalog search uses for one master track.
-#[cfg(any(feature = "qobuz", feature = "subsonic", feature = "youtube"))]
+#[cfg(any(
+  feature = "qobuz",
+  feature = "subsonic",
+  feature = "tidal",
+  feature = "youtube"
+))]
 fn catalog_query(target: &SyncTrack) -> String {
   format!(
     "{} {}",
@@ -268,8 +304,8 @@ fn catalog_query(target: &SyncTrack) -> String {
   .to_string()
 }
 
-/// The source-native ids of `tracks`, which is what both playlist writers take.
-#[cfg(any(feature = "qobuz", feature = "subsonic"))]
+/// The source-native ids of `tracks`, which is what the playlist writers take.
+#[cfg(any(feature = "qobuz", feature = "subsonic", feature = "tidal"))]
 fn keys_of(tracks: &[SyncTrack]) -> Vec<String> {
   tracks.iter().map(|track| track.key.clone()).collect()
 }
@@ -280,7 +316,8 @@ pub(crate) fn missing_sync_feature(source: Source) -> Option<&'static str> {
     Source::Qobuz => (!cfg!(feature = "qobuz")).then_some("qobuz"),
     Source::Subsonic => (!cfg!(feature = "subsonic")).then_some("subsonic"),
     Source::YouTube => (!cfg!(feature = "youtube")).then_some("youtube"),
-    Source::Spotify | Source::Local | Source::Radio | Source::Tidal => None,
+    Source::Tidal => (!cfg!(feature = "tidal")).then_some("tidal"),
+    Source::Spotify | Source::Local | Source::Radio => None,
   }
 }
 
@@ -301,6 +338,10 @@ pub(crate) async fn for_source(endpoint: &Endpoint, ctx: &SyncContext) -> Result
     #[cfg(feature = "qobuz")]
     Source::Qobuz => Ok(SourceClient::Qobuz(
       crate::infra::qobuz::dispatch::build_sync_source(&ctx.app).await?,
+    )),
+    #[cfg(feature = "tidal")]
+    Source::Tidal => Ok(SourceClient::Tidal(
+      crate::infra::tidal::dispatch::build_sync_source(&ctx.app).await?,
     )),
     #[cfg(feature = "subsonic")]
     Source::Subsonic => Ok(SourceClient::Subsonic(
@@ -395,8 +436,9 @@ fn refresh_playlists_event(source: Source) -> Option<IoEvent> {
     Source::Spotify => Some(IoEvent::GetPlaylists),
     Source::Qobuz => Some(IoEvent::GetQobuzPlaylists),
     Source::Subsonic => Some(IoEvent::GetSubsonicPlaylists),
+    Source::Tidal => Some(IoEvent::GetTidalPlaylists),
     // The YouTube client reloads the sidebar itself after every write.
-    Source::YouTube | Source::Local | Source::Radio | Source::Tidal => None,
+    Source::YouTube | Source::Local | Source::Radio => None,
   }
 }
 

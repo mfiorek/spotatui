@@ -623,4 +623,54 @@ mod tests {
       ActiveBlock::Dialog(DialogContext::PlaylistSyncPicker)
     );
   }
+
+  fn tidal_row(uri: &str, name: &str) -> crate::core::plugin_api::PlaylistInfo {
+    crate::core::plugin_api::PlaylistInfo {
+      uri: uri.to_string(),
+      name: name.to_string(),
+      owner: "me".to_string(),
+      track_count: 3,
+      id: None,
+      owner_id: None,
+      collaborative: false,
+      public: None,
+      image_url: None,
+    }
+  }
+
+  #[test]
+  fn m_on_a_tidal_playlist_opens_the_mirror_picker() {
+    let (tx, _rx) = channel();
+    let mut app =
+      App::new(tx, UserConfig::new(), Some(SystemTime::now())).under_source(Source::Tidal);
+    app
+      .tidal_playlists_mut()
+      .push(tidal_row("tidal:playlist:3f2a", "Mine"));
+    app.view.selected_playlist_index = Some(0);
+
+    handler(Key::Char('m'), &mut app);
+
+    assert_eq!(
+      app.get_current_route().active_block,
+      ActiveBlock::Dialog(DialogContext::PlaylistSyncPicker)
+    );
+  }
+
+  #[test]
+  fn m_on_the_tidal_favorites_row_opens_no_picker() {
+    let (tx, _rx) = channel();
+    let mut app =
+      App::new(tx, UserConfig::new(), Some(SystemTime::now())).under_source(Source::Tidal);
+    app
+      .tidal_playlists_mut()
+      .push(tidal_row("tidal:favorites:tracks", "Favorites"));
+    app.view.selected_playlist_index = Some(0);
+
+    handler(Key::Char('m'), &mut app);
+
+    assert_ne!(
+      app.get_current_route().active_block,
+      ActiveBlock::Dialog(DialogContext::PlaylistSyncPicker)
+    );
+  }
 }

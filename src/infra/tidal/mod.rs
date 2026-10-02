@@ -16,6 +16,7 @@ pub mod client;
 pub mod dash;
 pub mod dispatch;
 pub mod manifest;
+mod playlist_sync;
 #[cfg(test)]
 mod probe;
 pub mod segments;
@@ -539,6 +540,8 @@ pub(crate) mod test_server {
   pub struct Reply {
     status: &'static str,
     body: String,
+    /// Extra header lines, each `name: value`.
+    headers: Vec<String>,
   }
 
   impl Reply {
@@ -546,7 +549,14 @@ pub(crate) mod test_server {
       Reply {
         status,
         body: body.into(),
+        headers: Vec::new(),
       }
+    }
+
+    /// The reply with one more header.
+    pub fn with_header(mut self, name: &str, value: &str) -> Self {
+      self.headers.push(format!("{name}: {value}"));
+      self
     }
   }
 
@@ -595,8 +605,9 @@ pub(crate) mod test_server {
         }
         request.push_str(&String::from_utf8_lossy(&body));
         requests.push(request);
+        let extra: String = reply.headers.iter().map(|h| format!("{h}\r\n")).collect();
         let response = format!(
-          "HTTP/1.1 {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+          "HTTP/1.1 {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{extra}connection: close\r\n\r\n{}",
           reply.status,
           reply.body.len(),
           reply.body
@@ -607,6 +618,29 @@ pub(crate) mod test_server {
       requests
     });
     (base, handle)
+  }
+
+  /// A source logged in as user 42 against `base`.
+  pub fn source_at(base: &str) -> super::TidalSource {
+    use super::auth::{self, ClientCredentials, TidalCredentials};
+    let client = ClientCredentials {
+      id: "client-id".into(),
+      secret: "client-secret".into(),
+    };
+    let credentials = TidalCredentials {
+      client_id: "client-id".into(),
+      access_token: "token".into(),
+      refresh_token: "refresh".into(),
+      token_type: "Bearer".into(),
+      expires_at: auth::unix_now() + 3_600,
+      user_id: "42".into(),
+      country_code: "NO".into(),
+    };
+    super::TidalSource::new(std::sync::Arc::new(super::TidalClient::at(
+      base,
+      client,
+      credentials,
+    )))
   }
 
   /// A file server that honours `Range`, for the download tests.
@@ -737,28 +771,11 @@ pub(crate) mod test_server {
 mod tests {
   use base64::Engine as _;
 
-  use super::test_server::{serve, Reply};
+  use super::test_server::{serve, source_at, Reply};
   use super::*;
 
   fn track(json: &str) -> types::Track {
     serde_json::from_str(json).unwrap()
-  }
-
-  fn source_at(base: &str) -> TidalSource {
-    let client = ClientCredentials {
-      id: "client-id".into(),
-      secret: "client-secret".into(),
-    };
-    let credentials = TidalCredentials {
-      client_id: "client-id".into(),
-      access_token: "token".into(),
-      refresh_token: "refresh".into(),
-      token_type: "Bearer".into(),
-      expires_at: auth::unix_now() + 3_600,
-      user_id: "42".into(),
-      country_code: "NO".into(),
-    };
-    TidalSource::new(Arc::new(TidalClient::at(base, client, credentials)))
   }
 
   fn page(ids: &[u32], total: usize) -> Reply {

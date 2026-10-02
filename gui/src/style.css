@@ -303,6 +303,12 @@ kbd {
   );
 }
 
+.swatch.tidal {
+  background:
+    linear-gradient(var(--text) 1px, transparent 1px) 0 0 / 4px 4px,
+    linear-gradient(90deg, var(--text) 1px, transparent 1px) 0 0 / 4px 4px;
+}
+
 .swatch.subsonic {
   background: repeating-conic-gradient(var(--text) 0 25%, transparent 0 50%) 0
     0 / 5px 5px;

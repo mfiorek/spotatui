@@ -57,3 +57,13 @@
   `file_is_complete()`: the slot dropped the progressive reader, which stops
   its download. Only `tidal:track:` URIs are playable (`is_playable_track_uri`);
   playlist and album URIs share the scheme.
+- Playlist sync (`playlist_sync.rs`) uses the private-API writes python-tidal
+  sends. Every add or remove reads the playlist's `ETag` first and sends it
+  as `If-None-Match`; a missing `ETag` refuses the write. Creation is the v2
+  `my-collection/playlists/folders/create-playlist` (into `root`), the only
+  v2 call. Removal deletes by item index, last copy first and highest index
+  first, from `playlists/<uuid>/items`, whose indices count videos too. A
+  mirror is adopted by name only among the user's own playlists (creator id
+  equals user id); a followed one can be a master. A sync run never starts
+  the device login (`dispatch::build_sync_source`), since it can run from the
+  CLI.
