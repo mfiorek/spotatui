@@ -260,8 +260,20 @@ pub enum IoEvent {
   /// Start the in-TUI Qobuz browser login (handled by `infra::qobuz::dispatch`).
   #[cfg_attr(not(feature = "qobuz"), allow(dead_code))]
   QobuzLogin,
+  /// List the Tidal sidebar rows: favorites, playlists, albums (handled by
+  /// `infra::tidal::dispatch`; a no-op on the Spotify network).
+  GetTidalPlaylists,
+  /// List the tracks of a Tidal sidebar row by its `tidal:` URI. Only read by
+  /// `infra::tidal::dispatch`; without the feature the event is an inert no-op.
+  #[cfg_attr(not(feature = "tidal"), allow(dead_code))]
+  GetTidalTracks(String),
+  /// Run a Tidal catalog search and populate `app.search_results`. Only read
+  /// by `infra::tidal::dispatch`; an inert no-op without the `tidal` feature.
+  #[cfg_attr(not(feature = "tidal"), allow(dead_code))]
+  GetTidalSearchResults(String),
   /// Make sure a Tidal login is in place: restore the saved one, else run the
   /// device login (handled by `infra::tidal::dispatch`).
+  #[cfg_attr(not(feature = "tidal"), allow(dead_code))]
   TidalLogin,
   /// Load the configured internet-radio stations into the sidebar (handled by
   /// `infra::radio::dispatch`; a no-op on the Spotify network).
@@ -580,6 +592,9 @@ impl Network {
         | IoEvent::GetQobuzTracks(_)
         | IoEvent::GetQobuzSearchResults(_)
         | IoEvent::QobuzLogin
+        | IoEvent::GetTidalPlaylists
+        | IoEvent::GetTidalTracks(_)
+        | IoEvent::GetTidalSearchResults(_)
         | IoEvent::TidalLogin
         | IoEvent::GetRadioStations
         | IoEvent::GetRadioSearchResults(_)
@@ -1107,9 +1122,12 @@ impl Network {
       | IoEvent::GetQobuzTracks(_)
       | IoEvent::GetQobuzSearchResults(_)
       | IoEvent::QobuzLogin => {}
-      // The Tidal login is handled by infra::tidal::dispatch before reaching
-      // the network; it only arrives here when the feature is off.
-      IoEvent::TidalLogin => {}
+      // Tidal browse/search/login events are handled by infra::tidal::dispatch
+      // before reaching the network; they only arrive here when the feature is off.
+      IoEvent::GetTidalPlaylists
+      | IoEvent::GetTidalTracks(_)
+      | IoEvent::GetTidalSearchResults(_)
+      | IoEvent::TidalLogin => {}
       // Radio browse/search events are handled by infra::radio::dispatch before
       // reaching the network; they only arrive here when the feature is off.
       IoEvent::GetRadioStations | IoEvent::GetRadioSearchResults(_) => {}

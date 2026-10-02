@@ -1615,6 +1615,13 @@ fn search_active_source_routes_by_the_active_source() {
     Ok(IoEvent::GetQobuzSearchResults(q)) if q == "coltrane"
   ));
 
+  app.active_source = Source::Tidal;
+  app.apply(Action::SearchActiveSource(query.clone()));
+  assert!(matches!(
+    rx.try_recv(),
+    Ok(IoEvent::GetTidalSearchResults(q)) if q == "coltrane"
+  ));
+
   app.active_source = Source::Spotify;
   app.apply(Action::SearchActiveSource(query.clone()));
   assert!(matches!(
@@ -2327,6 +2334,9 @@ fn select_source_fetches_each_scopes_own_sidebar() {
 
   app.apply(Action::SelectSource(Source::Qobuz));
   assert!(matches!(rx.try_recv(), Ok(IoEvent::GetQobuzPlaylists)));
+
+  app.apply(Action::SelectSource(Source::Tidal));
+  assert!(matches!(rx.try_recv(), Ok(IoEvent::GetTidalPlaylists)));
 }
 
 #[test]
@@ -2600,6 +2610,25 @@ fn open_source_playlist_qobuz_uses_the_qobuz_context() {
   match rx.try_recv() {
     Ok(IoEvent::GetQobuzTracks(uri)) => assert_eq!(uri, "qobuz:album:0060254730301"),
     _other => panic!("expected GetQobuzTracks (IoEvent is not Debug)"),
+  }
+}
+
+#[test]
+fn open_source_playlist_tidal_uses_the_tidal_context() {
+  let (mut app, rx) = app_with_channel();
+
+  app.apply(Action::Open(OpenTarget::SourcePlaylist(
+    "tidal:album:77646169".to_string(),
+  )));
+
+  assert_eq!(
+    app.track_table.context,
+    Some(crate::core::app::TrackTableContext::TidalPlaylist)
+  );
+  assert_eq!(app.get_current_route().id, RouteId::TrackTable);
+  match rx.try_recv() {
+    Ok(IoEvent::GetTidalTracks(uri)) => assert_eq!(uri, "tidal:album:77646169"),
+    _other => panic!("expected GetTidalTracks (IoEvent is not Debug)"),
   }
 }
 
@@ -3113,6 +3142,19 @@ fn queue_track_rejects_a_radio_stream() {
 
   assert!(app.native_queue.is_empty());
   assert_eq!(app.status_message(), Some("Radio stations can't be queued"));
+  assert!(rx.try_recv().is_err(), "expected no IoEvent dispatched");
+}
+
+#[test]
+fn queue_track_rejects_a_tidal_track_for_now() {
+  let (mut app, rx) = app_with_channel();
+  app.apply(Action::QueueTrack(queued("tidal:track:11", "Song")));
+
+  assert!(app.native_queue.is_empty());
+  assert_eq!(
+    app.status_message(),
+    Some("Tidal tracks can't be queued yet")
+  );
   assert!(rx.try_recv().is_err(), "expected no IoEvent dispatched");
 }
 

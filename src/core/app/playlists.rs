@@ -83,6 +83,12 @@ impl App {
     &self.tidal_playlists
   }
 
+  #[cfg_attr(not(feature = "tidal"), allow(dead_code))]
+  pub(crate) fn tidal_playlists_mut(&mut self) -> &mut Vec<PlaylistInfo> {
+    self.display_revisions.bump(DisplayDomain::Library);
+    &mut self.tidal_playlists
+  }
+
   pub(crate) fn radio_stations(&self) -> &Vec<TrackInfo> {
     &self.radio_stations
   }

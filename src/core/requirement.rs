@@ -157,6 +157,14 @@ mod tests {
       Availability::Available
     );
     assert_eq!(
+      availability(search, Source::Tidal, false),
+      Availability::Available
+    );
+    assert_eq!(
+      availability(like, Source::Tidal, true),
+      Availability::NotForSource(Source::Tidal)
+    );
+    assert_eq!(
       availability(search, Source::Local, true),
       Availability::NotForSource(Source::Local)
     );
@@ -176,6 +184,10 @@ mod tests {
     assert_eq!(
       availability(sync, Source::Qobuz, false),
       Availability::Available
+    );
+    assert_eq!(
+      availability(sync, Source::Tidal, false),
+      Availability::NotForSource(Source::Tidal)
     );
     assert_eq!(
       availability(sync, Source::Local, true),

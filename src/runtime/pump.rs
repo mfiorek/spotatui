@@ -7,6 +7,10 @@ use crate::core::queue::{
 };
 use crate::infra::network::{IoEvent, Network};
 
+/// Why a `tidal:` start is dropped while the source browses but cannot play.
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
+const TIDAL_PLAYBACK_PENDING: &str = "Tidal playback is not available yet.";
+
 /// The URI a `StartPlayback` addresses: the context, or the head of the list.
 #[cfg_attr(not(feature = "tui"), allow(dead_code))]
 fn start_playback_uri(event: &IoEvent) -> Option<&str> {
@@ -27,6 +31,9 @@ fn start_playback_has_taker(event: &IoEvent, spotify_session: bool) -> bool {
     IoEvent::StartPlayback(..) => match start_playback_uri(event) {
       // Radio is never queued, so `queue_item_source` does not know its scheme.
       Some(uri) if uri.starts_with("radio:") => cfg!(feature = "internet-radio"),
+      // Nothing plays Tidal yet; `queue_item_source` would call it Spotify,
+      // and the routers' foreign-start arms would stop the audible player.
+      Some(uri) if uri.starts_with("tidal:") => false,
       Some(uri) => match queue_item_source(uri) {
         QueueItemSource::Spotify => spotify_session,
         source => source_available(source),
@@ -44,6 +51,12 @@ fn dropped_start_status(event: &IoEvent) -> String {
   let missing_feature = match start_playback_uri(event) {
     Some(uri) if uri.starts_with("radio:") => {
       (!cfg!(feature = "internet-radio")).then_some("internet-radio")
+    }
+    Some(uri) if uri.starts_with("tidal:") => {
+      if cfg!(feature = "tidal") {
+        return TIDAL_PLAYBACK_PENDING.to_string();
+      }
+      Some("tidal")
     }
     Some(uri) => missing_source_feature(uri),
     None => None,
@@ -238,6 +251,26 @@ mod tests {
 
     assert!(start_playback_has_taker(&start, true));
     assert!(!start_playback_has_taker(&start, false));
+  }
+
+  #[test]
+  fn a_tidal_start_has_no_taker_even_with_a_session() {
+    let start = IoEvent::StartPlayback(None, Some(vec!["tidal:track:1".to_string()]), Some(0));
+
+    assert!(!start_playback_has_taker(&start, true));
+    assert!(!start_playback_has_taker(&start, false));
+  }
+
+  #[test]
+  fn a_dropped_tidal_start_says_why() {
+    let start = IoEvent::StartPlayback(None, Some(vec!["tidal:track:1".to_string()]), Some(0));
+
+    let expected = if cfg!(feature = "tidal") {
+      TIDAL_PLAYBACK_PENDING.to_string()
+    } else {
+      "This spotatui was built without the `tidal` feature, so nothing can play that.".to_string()
+    };
+    assert_eq!(dropped_start_status(&start), expected);
   }
 
   #[test]

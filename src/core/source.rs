@@ -125,7 +125,12 @@ impl Source {
   pub fn supports_search(&self) -> bool {
     matches!(
       self,
-      Source::Spotify | Source::Subsonic | Source::Radio | Source::YouTube | Source::Qobuz
+      Source::Spotify
+        | Source::Subsonic
+        | Source::Radio
+        | Source::YouTube
+        | Source::Qobuz
+        | Source::Tidal
     )
   }
 
@@ -228,9 +233,8 @@ mod tests {
   }
 
   #[test]
-  fn tidal_supports_no_capability_yet() {
-    // The source is a skeleton: no browsing or search is wired up yet.
-    assert!(!Source::Tidal.supports_search());
+  fn tidal_supports_search_only() {
+    assert!(Source::Tidal.supports_search());
     assert!(!Source::Tidal.supports_library());
     assert!(!Source::Tidal.supports_playlist_write());
     assert!(!Source::Tidal.supports_like());

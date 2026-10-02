@@ -31,6 +31,7 @@ pub enum TrackTableContext {
   SubsonicPlaylist,
   YouTubePlaylist,
   QobuzPlaylist,
+  TidalPlaylist,
 }
 
 /// The five search result pages. Their cursors and focus are `App.view`'s
@@ -149,7 +150,8 @@ impl App {
         TrackTableContext::LocalPlaylist
         | TrackTableContext::SubsonicPlaylist
         | TrackTableContext::YouTubePlaylist
-        | TrackTableContext::QobuzPlaylist,
+        | TrackTableContext::QobuzPlaylist
+        | TrackTableContext::TidalPlaylist,
       ) => self.source_table_uri.clone(),
       _ => None,
     }

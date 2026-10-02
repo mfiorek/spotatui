@@ -34,6 +34,12 @@ impl App {
       self.set_status_message("Radio stations can't be queued", 3);
       return;
     }
+    // Nothing plays a queued Tidal track yet, and `queue_item_source` would
+    // hand it to librespot as a Spotify URI.
+    if uri.starts_with("tidal:") {
+      self.set_status_message("Tidal tracks can't be queued yet", 3);
+      return;
+    }
     // A Spotify track controlled on an external device has no native sink to
     // play through, so fall back to the Spotify Web-API queue.
     if matches!(

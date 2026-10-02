@@ -115,6 +115,11 @@ impl App {
         TrackTableContext::QobuzPlaylist,
         IoEvent::GetQobuzTracks(uri),
       )
+    } else if uri.starts_with("tidal:") {
+      (
+        TrackTableContext::TidalPlaylist,
+        IoEvent::GetTidalTracks(uri),
+      )
     } else {
       // Unknown scheme: silent no-op, like the other opening paths.
       return;
@@ -130,7 +135,8 @@ impl App {
       feature = "local-files",
       feature = "subsonic",
       feature = "youtube",
-      feature = "qobuz"
+      feature = "qobuz",
+      feature = "tidal"
     )),
     allow(dead_code)
   )]
@@ -150,6 +156,7 @@ impl App {
   #[cfg(any(
     feature = "subsonic",
     feature = "qobuz",
+    feature = "tidal",
     feature = "internet-radio",
     feature = "youtube"
   ))]
@@ -759,6 +766,7 @@ mod tests {
   #[cfg(any(
     feature = "subsonic",
     feature = "qobuz",
+    feature = "tidal",
     feature = "internet-radio",
     feature = "youtube"
   ))]

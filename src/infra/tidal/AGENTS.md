@@ -12,3 +12,10 @@
   ID that minted it, never the secret; a different configured client ID asks
   for a new login. `TidalClient` refreshes while holding its token mutex, so
   concurrent callers share one refresh; every rotated token is saved.
+- Browsing (`TidalSource` in `mod.rs`, serde types in `types.rs`) follows
+  limit/offset pages by items received, 100 per page (50 for
+  `playlistsAndFavoritePlaylists`, which refuses more), capped at 10k items.
+  A browse uses the in-memory login, else restores the saved one inline, else
+  dispatches `TidalLogin`, whose success reloads the sidebar. Ids go into
+  request paths unescaped, so `listing_from_uri` admits only uuid characters.
+  Until playback lands, the pump's claim gate drops `tidal:` starts.

@@ -98,26 +98,29 @@ pub fn draw_playlist_block(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
     return;
   }
 
-  // Qobuz: the sidebar Playlists panel lists the favorites row, the user's
-  // playlists, and the favorite albums, each opening the shared track table.
-  if app.active_source == Source::Qobuz {
-    let items: Vec<String> = if app.qobuz_playlists().is_empty() {
+  // Qobuz and Tidal: the sidebar Playlists panel lists the favorites row, the
+  // user's playlists, and the favorite albums, each opening the shared track
+  // table.
+  let rows = match app.active_source {
+    Source::Qobuz => Some(app.qobuz_playlists()),
+    Source::Tidal => Some(app.tidal_playlists()),
+    _ => None,
+  };
+  if let Some(rows) = rows {
+    let label = app.active_source.label();
+    let items: Vec<String> = if rows.is_empty() {
       vec![format!(
-        "(not logged in \u{2014} press `{}`, pick Qobuz)",
+        "(not logged in \u{2014} press `{}`, pick {label})",
         app.user_config.keys.manage_devices
       )]
     } else {
-      app
-        .qobuz_playlists()
-        .iter()
-        .map(|p| p.name.clone())
-        .collect()
+      rows.iter().map(|p| p.name.clone()).collect()
     };
     draw_selectable_list(
       f,
       app,
       layout_chunk,
-      "Qobuz",
+      label,
       &items,
       highlight_state,
       app.view.selected_playlist_index,

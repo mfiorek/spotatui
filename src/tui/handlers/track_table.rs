@@ -234,7 +234,9 @@ fn play_random_song(app: &mut App) {
           });
         }
       }
-      TrackTableContext::YouTubePlaylist | TrackTableContext::QobuzPlaylist => {
+      TrackTableContext::YouTubePlaylist
+      | TrackTableContext::QobuzPlaylist
+      | TrackTableContext::TidalPlaylist => {
         // Queue the whole playlist and start at a random offset, so
         // Next/Previous and auto-advance keep working within the playlist.
         let playable_ids: Vec<String> = app
@@ -325,7 +327,8 @@ fn on_enter(app: &mut App) {
       TrackTableContext::LocalPlaylist
       | TrackTableContext::SubsonicPlaylist
       | TrackTableContext::YouTubePlaylist
-      | TrackTableContext::QobuzPlaylist => {
+      | TrackTableContext::QobuzPlaylist
+      | TrackTableContext::TidalPlaylist => {
         // Queue the whole folder/playlist (in displayed order) and start at the
         // selected track, so Next/Previous/auto-advance have a queue to move
         // through. Routed to the local, subsonic or youtube player by URI
