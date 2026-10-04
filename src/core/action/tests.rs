@@ -2633,6 +2633,36 @@ fn open_source_playlist_tidal_uses_the_tidal_context() {
 }
 
 #[test]
+fn open_source_artist_tidal_asks_tidal_for_the_page() {
+  let (mut app, rx) = app_with_channel();
+
+  app.apply(Action::Open(OpenTarget::SourceArtist {
+    uri: "tidal:artist:4211".to_string(),
+    name: "The Offspring".to_string(),
+  }));
+
+  match rx.try_recv() {
+    Ok(IoEvent::GetTidalArtist(uri, name)) => {
+      assert_eq!(uri, "tidal:artist:4211");
+      assert_eq!(name, "The Offspring");
+    }
+    _other => panic!("expected GetTidalArtist (IoEvent is not Debug)"),
+  }
+}
+
+#[test]
+fn open_source_artist_with_an_unknown_scheme_does_nothing() {
+  let (mut app, rx) = app_with_channel();
+
+  app.apply(Action::Open(OpenTarget::SourceArtist {
+    uri: "spotify:artist:0OdUWJ0sBjDrqHygGUXeCF".to_string(),
+    name: "Band of Horses".to_string(),
+  }));
+
+  assert!(rx.try_recv().is_err());
+}
+
+#[test]
 fn open_source_playlist_subsonic_uses_the_subsonic_context() {
   let (mut app, rx) = app_with_channel();
 

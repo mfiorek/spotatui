@@ -54,6 +54,7 @@ use super::dash;
 use super::manifest::{self, Delivered, StreamKind, StreamSource};
 use super::{track_id_from_uri, ResumePoint, TidalPlaybackState, TidalSource};
 use crate::core::app::{App, TrackTableContext};
+use crate::core::plugin_api::TrackInfo;
 use crate::core::source::{MediaSource, Searcher, Source};
 use crate::core::state::PersistedRuntimeState;
 use crate::infra::audio::{LocalPlayer, PreparedStream};
@@ -96,6 +97,10 @@ pub async fn route_tidal_event(app: &Arc<Mutex<App>>, event: &IoEvent) -> bool {
       run_tidal_search(app, query).await;
       true
     }
+    IoEvent::GetTidalArtist(uri, name) => {
+      load_tidal_artist(app, uri, name).await;
+      true
+    }
     IoEvent::TidalLogin => {
       begin_login(app).await;
       true
@@ -105,6 +110,13 @@ pub async fn route_tidal_event(app: &Arc<Mutex<App>>, event: &IoEvent) -> bool {
       if uris.first().is_some_and(|u| is_tidal_uri(u)) =>
     {
       start_tidal_queue(app, uris, offset.unwrap_or(0), None).await;
+      true
+    }
+    // An album, playlist or artist URI: fetch its tracks and play them, from
+    // the first given track when there is one, else from the offset.
+    IoEvent::StartPlayback(Some(context), uris, offset) if super::is_listing_uri(context) => {
+      let first = uris.as_ref().and_then(|uris| uris.first()).cloned();
+      play_tidal_listing(app, context, first, offset.unwrap_or(0)).await;
       true
     }
     // A single Tidal track with no surrounding list: a one-track queue.
@@ -286,18 +298,61 @@ async fn load_tidal_tracks(app: &Arc<Mutex<App>>, playlist_uri: &str) {
   }
 }
 
-/// Run a catalog search and populate the songs block of `app.search_results`.
+/// Run a catalog search and populate every block of `app.search_results`.
 async fn run_tidal_search(app: &Arc<Mutex<App>>, query: &str) {
   let Some(source) = build_source(app, WhenLoggedOut::Login).await else {
     return;
   };
   match source.search(query).await {
-    Ok(results) => app
-      .lock()
-      .await
-      .show_source_search_tracks(query, results.tracks),
+    Ok(results) => app.lock().await.show_source_search_results(query, results),
     Err(e) => report(app, "search", e).await,
   }
+}
+
+/// Fetch an artist page and open it.
+async fn load_tidal_artist(app: &Arc<Mutex<App>>, uri: &str, name: &str) {
+  let Some(source) = build_source(app, WhenLoggedOut::Login).await else {
+    return;
+  };
+  match source.artist_page(uri).await {
+    Ok(page) => {
+      let id = uri.rsplit(':').next().unwrap_or_default().to_string();
+      app.lock().await.show_source_artist(
+        id,
+        name.to_string(),
+        page.top_tracks,
+        page.albums,
+        page.similar,
+      );
+    }
+    Err(e) => report(app, "artist", e).await,
+  }
+}
+
+/// Play a listing (album, playlist, artist top tracks) by its URI.
+async fn play_tidal_listing(
+  app: &Arc<Mutex<App>>,
+  uri: &str,
+  first: Option<String>,
+  offset: usize,
+) {
+  let Some(source) = build_source(app, WhenLoggedOut::Message).await else {
+    return;
+  };
+  match source.tracks(uri).await {
+    Ok(tracks) => {
+      let index = listing_start_index(&tracks, first.as_deref(), offset);
+      start_tidal_tracks(app, tracks, index, None).await;
+    }
+    Err(e) => report(app, "play", e).await,
+  }
+}
+
+/// Where a listing starts: at `first` when the listing has it, else `offset`.
+fn listing_start_index(tracks: &[TrackInfo], first: Option<&str>, offset: usize) -> usize {
+  first
+    .and_then(|uri| tracks.iter().position(|t| t.uri.as_deref() == Some(uri)))
+    .unwrap_or(offset)
 }
 
 // ---------------------------------------------------------------------------
@@ -707,15 +762,41 @@ pub(crate) async fn start_tidal_queue(
   start_idx: usize,
   resume: Option<ResumePoint>,
 ) {
-  let tracks = {
-    let guard = app.lock().await;
-    let search = guard
-      .search_results()
-      .tracks
-      .as_ref()
-      .map(|p| p.items.as_slice());
-    snapshot_tracks(&guard.track_table.tracks, search, uris)
-  };
+  let tracks = snapshot_from_views(&*app.lock().await, uris);
+  start_tidal_tracks(app, tracks, start_idx, resume).await;
+}
+
+/// The tracks of `uris` from the view the play started in: the track table
+/// or the search results, else the artist page's top tracks.
+fn snapshot_from_views(app: &App, uris: &[String]) -> Vec<TrackInfo> {
+  let search = app
+    .search_results()
+    .tracks
+    .as_ref()
+    .map(|p| p.items.as_slice());
+  let tracks = snapshot_tracks(&app.track_table.tracks, search, uris);
+  if tracks.len() == uris.len() {
+    return tracks;
+  }
+  let top_tracks = app
+    .artist
+    .as_ref()
+    .map(|artist| snapshot_tracks(&artist.top_tracks, None, uris))
+    .unwrap_or_default();
+  if top_tracks.len() > tracks.len() {
+    top_tracks
+  } else {
+    tracks
+  }
+}
+
+/// Start a queue of `tracks` at `start_idx`.
+async fn start_tidal_tracks(
+  app: &Arc<Mutex<App>>,
+  tracks: Vec<TrackInfo>,
+  start_idx: usize,
+  resume: Option<ResumePoint>,
+) {
   if tracks.is_empty() {
     set_status(app, "No Tidal tracks to play", 6).await;
     return;
@@ -1032,6 +1113,73 @@ mod tests {
       url: String::new(),
       mime_type: None,
     }
+  }
+
+  fn tidal_track(id: &str) -> TrackInfo {
+    TrackInfo {
+      uri: Some(format!("tidal:track:{id}")),
+      name: id.to_string(),
+      artists: vec![],
+      album: String::new(),
+      duration_ms: 0,
+      id: Some(id.to_string()),
+      album_id: None,
+      artist_refs: vec![],
+      is_playable: true,
+      is_local: false,
+      track_number: 0,
+      explicit: false,
+      image_url: None,
+    }
+  }
+
+  #[test]
+  fn a_listing_starts_at_its_named_track_else_at_the_offset() {
+    let tracks = [tidal_track("1"), tidal_track("2"), tidal_track("3")];
+    assert_eq!(listing_start_index(&tracks, Some("tidal:track:3"), 0), 2);
+    assert_eq!(listing_start_index(&tracks, Some("tidal:track:9"), 1), 1);
+    assert_eq!(listing_start_index(&tracks, None, 1), 1);
+  }
+
+  #[test]
+  fn a_play_from_the_artist_page_finds_its_top_tracks() {
+    let mut app = App::default();
+    app.show_source_artist(
+      "7".to_string(),
+      "Band".to_string(),
+      vec![tidal_track("1"), tidal_track("2")],
+      vec![],
+      vec![],
+    );
+    let uris = ["tidal:track:1".to_string(), "tidal:track:2".to_string()];
+
+    let tracks = snapshot_from_views(&app, &uris);
+
+    assert_eq!(tracks.len(), 2);
+    assert_eq!(tracks[1].uri.as_deref(), Some("tidal:track:2"));
+  }
+
+  #[test]
+  fn a_play_from_the_track_table_wins_over_the_artist_page() {
+    let mut app = App::default();
+    app.show_source_artist(
+      "7".to_string(),
+      "Band".to_string(),
+      vec![tidal_track("1")],
+      vec![],
+      vec![],
+    );
+    let mut from_table = tidal_track("1");
+    from_table.name = "from the table".to_string();
+    app.set_source_track_table(
+      "tidal:album:5",
+      vec![from_table],
+      TrackTableContext::TidalPlaylist,
+    );
+
+    let tracks = snapshot_from_views(&app, &["tidal:track:1".to_string()]);
+
+    assert_eq!(tracks[0].name, "from the table");
   }
 
   #[test]

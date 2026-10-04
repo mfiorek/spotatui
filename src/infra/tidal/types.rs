@@ -47,6 +47,9 @@ pub struct Artist {
   pub id: String,
   #[serde(default)]
   pub name: String,
+  /// The portrait uuid; see [`super::image_url`]. Absent on nested artists.
+  #[serde(default)]
+  pub picture: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -63,6 +66,15 @@ pub struct Album {
   pub cover: Option<String>,
   #[serde(default)]
   pub artist: Option<Artist>,
+  /// Every credited artist; the main one is `artist`.
+  #[serde(default)]
+  pub artists: Vec<Artist>,
+  /// `ALBUM`, `EP` or `SINGLE`.
+  #[serde(default, rename = "type")]
+  pub kind: Option<String>,
+  /// `YYYY-MM-DD`.
+  #[serde(default)]
+  pub release_date: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -106,6 +118,26 @@ pub struct PlaylistEntry {
   pub item: Track,
   #[serde(default, rename = "type")]
   pub kind: String,
+}
+
+/// The reply of the combined `search` call: one page per requested type.
+#[derive(Debug, Deserialize)]
+pub struct SearchReply {
+  #[serde(default = "empty_list")]
+  pub artists: List<Artist>,
+  #[serde(default = "empty_list")]
+  pub albums: List<Album>,
+  #[serde(default = "empty_list")]
+  pub playlists: List<Playlist>,
+  #[serde(default = "empty_list")]
+  pub tracks: List<Track>,
+}
+
+fn empty_list<T>() -> List<T> {
+  List {
+    items: Vec::new(),
+    total_number_of_items: 0,
+  }
 }
 
 /// The `{ data }` reply of the v2 create-playlist call.

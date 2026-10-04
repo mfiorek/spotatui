@@ -3,4 +3,4 @@
 /**
  * A resource deep-link [`Action::Open`] can address, by id.
  */
-export type OpenTarget = { "Album": { id: string, from_search: boolean, } } | { "SavedAlbum": string } | { "Artist": { id: string, name: string, } } | { "Playlist": { id: string, from_search: boolean, } } | { "SourcePlaylist": string } | { "PlaylistFolder": number } | { "Show": string } | { "TrackAlbum": string };
+export type OpenTarget = { "Album": { id: string, from_search: boolean, } } | { "SavedAlbum": string } | { "Artist": { id: string, name: string, } } | { "Playlist": { id: string, from_search: boolean, } } | { "SourcePlaylist": string } | { "SourceArtist": { uri: string, name: string, } } | { "PlaylistFolder": number } | { "Show": string } | { "TrackAlbum": string };

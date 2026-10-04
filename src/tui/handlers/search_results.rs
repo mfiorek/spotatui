@@ -294,6 +294,41 @@ fn selected_search_artist_identity(app: &App) -> Option<(String, String)> {
   Some((artist.id.clone()?, artist.name.clone()))
 }
 
+/// The decoded-source URI of the highlighted album, artist or playlist row.
+/// Song and show rows are not routed by it: songs already play by URI.
+fn selected_source_row_uri(app: &App) -> Option<String> {
+  let results = app.search_results();
+  let uri = match app.view.search_selected_block {
+    SearchResultBlock::AlbumSearch => results
+      .albums
+      .as_ref()?
+      .items
+      .get(app.view.search_selected_album_index?)?
+      .uri
+      .as_deref(),
+    SearchResultBlock::ArtistSearch => results
+      .artists
+      .as_ref()?
+      .items
+      .get(app.view.search_selected_artists_index?)?
+      .uri
+      .as_deref(),
+    SearchResultBlock::PlaylistSearch => Some(
+      results
+        .playlists
+        .as_ref()?
+        .items
+        .get(app.view.search_selected_playlists_index?)?
+        .uri
+        .as_str(),
+    ),
+    SearchResultBlock::SongSearch | SearchResultBlock::ShowSearch | SearchResultBlock::Empty => {
+      None
+    }
+  };
+  common_key_events::source_row_uri(uri)
+}
+
 /// The highlighted track row; `None` without a selection.
 fn selected_search_track_row(app: &App) -> Option<&TrackInfo> {
   let index = app.view.search_selected_tracks_index?;
@@ -312,6 +347,18 @@ fn selected_search_show_id(app: &App) -> Option<String> {
 }
 
 fn handle_enter_event_on_selected_block(app: &mut App) {
+  // A decoded source's album, artist or playlist opens through that source.
+  if let Some(uri) = selected_source_row_uri(app) {
+    if app.view.search_selected_block == SearchResultBlock::ArtistSearch {
+      let name = selected_search_artist_identity(app)
+        .map(|(_, name)| name)
+        .unwrap_or_default();
+      app.apply(Action::Open(OpenTarget::SourceArtist { uri, name }));
+    } else {
+      app.apply(Action::Open(OpenTarget::SourcePlaylist(uri)));
+    }
+    return;
+  }
   match &app.view.search_selected_block {
     SearchResultBlock::AlbumSearch => {
       if let Some(id) = selected_search_album_id(app) {
@@ -597,6 +644,11 @@ pub fn handler(key: Key, app: &mut App) {
       SearchResultBlock::Empty => handle_enter_event_on_hovered_block(app),
       _ => handle_enter_event_on_selected_block(app),
     },
+    Key::Char('w') | Key::Char('D') | Key::Char('r') if selected_source_row_uri(app).is_some() => {
+      if let Some(uri) = selected_source_row_uri(app) {
+        common_key_events::refuse_spotify_only_key(app, &uri);
+      }
+    }
     Key::Char('w') => match app.view.search_selected_block {
       SearchResultBlock::AlbumSearch => {
         if let Some(id) = selected_search_album_id(app) {
@@ -977,5 +1029,129 @@ mod tests {
       app.pending_playlist_open.as_deref(),
       Some("37i9dQZF1DXcBWIGoYBM5M")
     );
+  }
+
+  /// A Tidal result set: one album, one artist and one playlist row.
+  fn app_with_tidal_results() -> (App, std::sync::mpsc::Receiver<IoEvent>) {
+    use crate::core::plugin_api::{AlbumInfo, ArtistInfo, PlaylistInfo};
+    let (tx, rx) = channel();
+    let mut app = App::new(tx, UserConfig::new(), Some(SystemTime::now()));
+    app.set_search_results(crate::core::app::SearchResult {
+      albums: Some(Paged {
+        items: vec![AlbumInfo {
+          id: Some("5".into()),
+          uri: Some("tidal:album:5".into()),
+          name: "Smash".into(),
+          ..Default::default()
+        }],
+        total: 1,
+        ..Default::default()
+      }),
+      artists: Some(Paged {
+        items: vec![ArtistInfo {
+          id: Some("4211".into()),
+          uri: Some("tidal:artist:4211".into()),
+          name: "The Offspring".into(),
+          image_url: None,
+        }],
+        total: 1,
+        ..Default::default()
+      }),
+      playlists: Some(Paged {
+        items: vec![PlaylistInfo {
+          uri: "tidal:playlist:u-1".into(),
+          ..playlist_info("u-1", "Punk", "0", false)
+        }],
+        total: 1,
+        ..Default::default()
+      }),
+      ..Default::default()
+    });
+    app.view.search_selected_album_index = Some(0);
+    app.view.search_selected_artists_index = Some(0);
+    app.view.search_selected_playlists_index = Some(0);
+    app.push_navigation_stack(RouteId::Search, ActiveBlock::SearchResultBlock);
+    (app, rx)
+  }
+
+  #[test]
+  fn enter_on_a_tidal_album_opens_it_through_tidal() {
+    let (mut app, rx) = app_with_tidal_results();
+    app.view.search_selected_block = SearchResultBlock::AlbumSearch;
+
+    handler(Key::Enter, &mut app);
+
+    assert!(rx.try_recv().is_ok(), "the listing is fetched");
+    assert_eq!(
+      app.track_table.context,
+      Some(TrackTableContext::TidalPlaylist)
+    );
+    assert_eq!(app.get_current_route().id, RouteId::TrackTable);
+  }
+
+  #[test]
+  fn enter_on_a_tidal_playlist_opens_it_through_tidal() {
+    let (mut app, rx) = app_with_tidal_results();
+    app.view.search_selected_block = SearchResultBlock::PlaylistSearch;
+
+    handler(Key::Enter, &mut app);
+
+    // The Spotify path cannot parse this id and would open nothing.
+    assert!(rx.try_recv().is_ok(), "the listing is fetched");
+    assert_eq!(
+      app.track_table.context,
+      Some(TrackTableContext::TidalPlaylist)
+    );
+    assert_eq!(app.get_current_route().id, RouteId::TrackTable);
+  }
+
+  /// Enter opens `OpenTarget::SourceArtist` with this URI; the action tests
+  /// pin where that goes.
+  #[test]
+  fn a_tidal_artist_row_is_routed_by_its_uri() {
+    let (mut app, _rx) = app_with_tidal_results();
+    app.view.search_selected_block = SearchResultBlock::ArtistSearch;
+
+    assert_eq!(
+      selected_source_row_uri(&app).as_deref(),
+      Some("tidal:artist:4211")
+    );
+  }
+
+  #[test]
+  fn a_spotify_row_is_not_routed_to_a_source() {
+    let (mut app, _rx) = app_with_tidal_results();
+    app.set_search_results(crate::core::app::SearchResult {
+      playlists: Some(Paged {
+        items: vec![playlist_info("37i9dQZF1DXcBWIGoYBM5M", "Mix", "x", false)],
+        total: 1,
+        ..Default::default()
+      }),
+      ..Default::default()
+    });
+    app.view.search_selected_block = SearchResultBlock::PlaylistSearch;
+
+    assert_eq!(selected_source_row_uri(&app), None);
+  }
+
+  #[test]
+  fn spotify_library_keys_on_tidal_rows_send_nothing_to_spotify() {
+    let (mut app, rx) = app_with_tidal_results();
+    for block in [
+      SearchResultBlock::AlbumSearch,
+      SearchResultBlock::ArtistSearch,
+      SearchResultBlock::PlaylistSearch,
+    ] {
+      app.view.search_selected_block = block;
+      for key in ['w', 'D', 'r'] {
+        handler(Key::Char(key), &mut app);
+        assert!(rx.try_recv().is_err(), "{key}");
+        assert_eq!(
+          app.status_message(),
+          Some("Not available for Tidal results")
+        );
+      }
+    }
+    assert_eq!(app.get_current_route().id, RouteId::Search, "no dialog");
   }
 }

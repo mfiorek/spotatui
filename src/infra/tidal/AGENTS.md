@@ -18,6 +18,18 @@
   A browse uses the in-memory login, else restores the saved one inline, else
   dispatches `TidalLogin`, whose success reloads the sidebar. Ids go into
   request paths unescaped, so `listing_from_uri` admits only uuid characters.
+- Search is the one combined `search` call (artists, albums, playlists,
+  tracks; 50 each) and fills every block. Its rows carry `tidal:` URIs, and
+  the search and artist screens route a non-Spotify row by URI scheme
+  (`common_key_events::source_row_uri`): an album or playlist opens through
+  `OpenTarget::SourcePlaylist`, an artist through `OpenTarget::SourceArtist`
+  (`GetTidalArtist`, which fills the shared artist page: top tracks, albums
+  then EPs and singles, similar artists). Tidal answers 404 for an artist
+  with no similar artists, so that block is optional. `w`/`D`/`r` on those
+  rows refuse with a status message instead of sending a Tidal id to
+  Spotify. A `tidal:artist:` URI is also a listing (its top tracks), and a
+  `StartPlayback` whose context is a listing URI plays its tracks (the GUI's
+  search hits send those).
 - Playback (`dispatch.rs`, after Qobuz's) asks `playbackinfopostpaywall` for
   the `behavior.tidal_quality` tier, read when each fetch starts:
   HI_RES_LOSSLESS (the default), HIGH or LOW (`manifest.rs`, pure). LOSSLESS

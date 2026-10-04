@@ -151,12 +151,10 @@ impl App {
   }
 
   /// Show a decoded source's search hits as a songs-only result set with the
-  /// songs block focused. The album/artist blocks stay empty: their Enter
-  /// paths dispatch Spotify-bound events.
+  /// songs block focused, for the sources whose search returns songs only.
   #[cfg(any(
     feature = "subsonic",
     feature = "qobuz",
-    feature = "tidal",
     feature = "internet-radio",
     feature = "youtube"
   ))]
@@ -174,6 +172,36 @@ impl App {
       ..Default::default()
     };
     self.display_revisions.bump(DisplayDomain::Search);
+    self.view.search_selected_tracks_index = Some(0);
+    self.view.search_hovered_block = SearchResultBlock::SongSearch;
+    self.view.search_selected_block = SearchResultBlock::Empty;
+  }
+
+  /// Show a decoded source's full search results (songs, artists, albums,
+  /// playlists) with the songs block focused. Every row carries the source's
+  /// URI, which the search screen's Enter routes back to that source.
+  #[cfg(feature = "tidal")]
+  pub(crate) fn show_source_search_results(
+    &mut self,
+    query: &str,
+    results: crate::core::plugin_api::SearchResults,
+  ) {
+    fn paged<T>(items: Vec<T>) -> Option<Paged<T>> {
+      let total = items.len() as u32;
+      Some(Paged {
+        items,
+        total,
+        ..Default::default()
+      })
+    }
+    self.set_search_results(SearchResult {
+      tracks: paged(results.tracks),
+      artists: paged(results.artists),
+      albums: paged(results.albums),
+      playlists: paged(results.playlists),
+      shows: None,
+      query: Some(query.to_string()),
+    });
     self.view.search_selected_tracks_index = Some(0);
     self.view.search_hovered_block = SearchResultBlock::SongSearch;
     self.view.search_selected_block = SearchResultBlock::Empty;
@@ -766,7 +794,6 @@ mod tests {
   #[cfg(any(
     feature = "subsonic",
     feature = "qobuz",
-    feature = "tidal",
     feature = "internet-radio",
     feature = "youtube"
   ))]
@@ -783,6 +810,54 @@ mod tests {
       ))],
     );
 
+    assert_eq!(
+      app.display_revisions().get(DisplayDomain::Search),
+      before + 1
+    );
+  }
+
+  #[cfg(feature = "tidal")]
+  #[test]
+  fn a_full_source_search_fills_every_block_and_focuses_the_songs() {
+    use crate::core::plugin_api::{AlbumInfo, ArtistInfo, PlaylistInfo, SearchResults};
+    let mut app = App::default();
+    app.view.search_selected_album_index = Some(7);
+    app.view.search_selected_block = SearchResultBlock::AlbumSearch;
+    let before = app.display_revisions().get(DisplayDomain::Search);
+
+    app.show_source_search_results(
+      "offspring",
+      SearchResults {
+        tracks: vec![TrackInfo {
+          uri: Some("tidal:track:1".into()),
+          ..TrackInfo::from(&full_track("0000000000000000000001", "Hit"))
+        }],
+        artists: vec![ArtistInfo {
+          uri: Some("tidal:artist:2".into()),
+          ..Default::default()
+        }],
+        albums: vec![AlbumInfo {
+          uri: Some("tidal:album:3".into()),
+          ..Default::default()
+        }],
+        playlists: vec![PlaylistInfo {
+          uri: "tidal:playlist:u-4".into(),
+          ..crate::core::test_helpers::playlist_info("u-4", "Punk", "0", false)
+        }],
+        shows: vec![],
+      },
+    );
+
+    let results = app.search_results();
+    assert_eq!(results.tracks.as_ref().unwrap().items.len(), 1);
+    assert_eq!(results.artists.as_ref().unwrap().total, 1);
+    assert_eq!(results.albums.as_ref().unwrap().items.len(), 1);
+    assert_eq!(results.playlists.as_ref().unwrap().items.len(), 1);
+    assert_eq!(results.query.as_deref(), Some("offspring"));
+    assert_eq!(app.view.search_selected_tracks_index, Some(0));
+    assert_eq!(app.view.search_selected_album_index, Some(0), "clamped");
+    assert_eq!(app.view.search_hovered_block, SearchResultBlock::SongSearch);
+    assert_eq!(app.view.search_selected_block, SearchResultBlock::Empty);
     assert_eq!(
       app.display_revisions().get(DisplayDomain::Search),
       before + 1

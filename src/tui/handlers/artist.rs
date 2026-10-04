@@ -210,6 +210,31 @@ fn selected_related_artist(artist: &Artist) -> Option<(String, String)> {
   Some((related.id.clone()?, related.name.clone()))
 }
 
+/// The decoded-source URI of the row under the selected block's cursor;
+/// `None` on a Spotify artist page.
+fn selected_source_row_uri(artist: &Artist) -> Option<String> {
+  let uri = match artist.artist_selected_block {
+    ArtistBlock::TopTracks => artist
+      .top_tracks
+      .get(artist.selected_top_track_index)?
+      .uri
+      .as_deref(),
+    ArtistBlock::Albums => artist
+      .albums
+      .items
+      .get(artist.selected_album_index)?
+      .uri
+      .as_deref(),
+    ArtistBlock::RelatedArtists => artist
+      .related_artists
+      .get(artist.selected_related_artist_index)?
+      .uri
+      .as_deref(),
+    ArtistBlock::Empty => None,
+  };
+  common_key_events::source_row_uri(uri)
+}
+
 fn handle_recommend_event_on_selected_block(app: &mut App) {
   let Some(artist) = &app.artist else {
     return;
@@ -242,6 +267,10 @@ fn handle_enter_event_on_selected_block(app: &mut App) {
       app.apply(Action::PlayUris { uris, offset });
     }
     ArtistBlock::Albums => {
+      if let Some(uri) = selected_source_row_uri(artist) {
+        app.apply(Action::Open(OpenTarget::SourcePlaylist(uri)));
+        return;
+      }
       // GetAlbum fetches a FullAlbum and sets AlbumTableContext::Full — do NOT
       // set track_table.context here, as GetAlbum does not use the track table.
       if let Some(id) = selected_album_id(artist) {
@@ -252,6 +281,15 @@ fn handle_enter_event_on_selected_block(app: &mut App) {
       }
     }
     ArtistBlock::RelatedArtists => {
+      if let Some(uri) = selected_source_row_uri(artist) {
+        let name = artist
+          .related_artists
+          .get(artist.selected_related_artist_index)
+          .map(|related| related.name.clone())
+          .unwrap_or_default();
+        app.apply(Action::Open(OpenTarget::SourceArtist { uri, name }));
+        return;
+      }
       if let Some((id, name)) = selected_related_artist(artist) {
         app.apply(Action::Open(OpenTarget::Artist { id, name }));
       }
@@ -275,6 +313,7 @@ fn handle_enter_event_on_hovered_block(app: &mut App) {
 }
 
 pub fn handler(key: Key, app: &mut App) {
+  let source_uri = app.artist.as_ref().and_then(selected_source_row_uri);
   if let Some(artist) = &mut app.artist {
     match key {
       Key::Esc => {
@@ -335,6 +374,16 @@ pub fn handler(key: Key, app: &mut App) {
           handle_enter_event_on_selected_block(app);
         } else {
           handle_enter_event_on_hovered_block(app);
+        }
+      }
+      // A decoded source's page: recommending, saving and following are
+      // Spotify calls. Its top tracks keep `w` like the search songs block.
+      Key::Char('r') | Key::Char('w') | Key::Char('D')
+        if source_uri.is_some()
+          && (key == Key::Char('r') || artist.artist_selected_block != ArtistBlock::TopTracks) =>
+      {
+        if let Some(uri) = &source_uri {
+          common_key_events::refuse_spotify_only_key(app, uri);
         }
       }
       Key::Char('r') if artist.artist_selected_block != ArtistBlock::Empty => {
@@ -686,5 +735,95 @@ mod tests {
     }]);
 
     assert_eq!(selected_related_artist(&page), None);
+  }
+
+  /// A Tidal artist page focused on `block`: one top track, album and
+  /// similar artist, all carrying `tidal:` URIs.
+  fn tidal_app_on(
+    block: ArtistBlock,
+  ) -> (
+    App,
+    std::sync::mpsc::Receiver<crate::infra::network::IoEvent>,
+  ) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let app = App::new(
+      tx,
+      crate::core::user_config::UserConfig::new(),
+      Some(std::time::SystemTime::now()),
+    );
+    let mut top = track("11", "Self Esteem");
+    top.uri = Some("tidal:track:11".to_string());
+    let mut page = artist_page_with_tracks(
+      vec![top],
+      vec![ArtistInfo {
+        id: Some("8".to_string()),
+        uri: Some("tidal:artist:8".to_string()),
+        name: "Bad Religion".to_string(),
+        image_url: None,
+      }],
+    );
+    page.albums = Paged {
+      items: vec![crate::core::plugin_api::AlbumInfo {
+        id: Some("5".to_string()),
+        uri: Some("tidal:album:5".to_string()),
+        name: "Smash".to_string(),
+        ..Default::default()
+      }],
+      total: 1,
+      ..Default::default()
+    };
+    page.artist_selected_block = block;
+    (app_hovering_with(app, page), rx)
+  }
+
+  #[test]
+  fn enter_on_a_tidal_album_opens_it_through_tidal() {
+    let (mut app, rx) = tidal_app_on(ArtistBlock::Albums);
+
+    handler(Key::Enter, &mut app);
+
+    assert!(rx.try_recv().is_ok(), "the album is fetched");
+    assert_eq!(
+      app.track_table.context,
+      Some(crate::core::app::TrackTableContext::TidalPlaylist)
+    );
+  }
+
+  /// Enter opens `OpenTarget::SourceArtist` with this URI; the action tests
+  /// pin where that goes.
+  #[test]
+  fn a_similar_tidal_artist_is_routed_by_its_uri() {
+    let (app, _rx) = tidal_app_on(ArtistBlock::RelatedArtists);
+
+    assert_eq!(
+      selected_source_row_uri(app.artist.as_ref().unwrap()).as_deref(),
+      Some("tidal:artist:8")
+    );
+  }
+
+  #[test]
+  fn a_spotify_artist_page_is_not_routed_to_a_source() {
+    let page = artist_page(vec![related_artist("artist2", "Second")]);
+
+    assert_eq!(selected_source_row_uri(&page), None);
+  }
+
+  #[test]
+  fn spotify_library_keys_on_a_tidal_page_send_nothing_to_spotify() {
+    for (block, keys) in [
+      (ArtistBlock::Albums, &['w', 'D', 'r'][..]),
+      (ArtistBlock::RelatedArtists, &['w', 'D', 'r'][..]),
+      (ArtistBlock::TopTracks, &['r'][..]),
+    ] {
+      let (mut app, rx) = tidal_app_on(block);
+      for key in keys {
+        handler(Key::Char(*key), &mut app);
+        assert!(rx.try_recv().is_err(), "{key}");
+        assert_eq!(
+          app.status_message(),
+          Some("Not available for Tidal results")
+        );
+      }
+    }
   }
 }

@@ -1,4 +1,5 @@
 use crate::core::app::{ActiveBlock, App, InputContext, SearchResultBlock};
+use crate::core::source::Source;
 use crate::tui::layout::COMPACT_TOP_ROW_THRESHOLD;
 use crate::tui::theme::ThemeExt;
 use ratatui::{
@@ -306,7 +307,9 @@ pub fn draw_search_results(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
       None => vec![],
     };
 
-    if playlists.is_empty() {
+    // The hint explains a Spotify API gap; Local searches Spotify too.
+    let spotify_search = matches!(app.active_source, Source::Spotify | Source::Local);
+    if playlists.is_empty() && spotify_search {
       let warning_text = "Cannot display Spotify created playlists. Try a more specific search to find user-created playlists.";
       let warning_paragraph = Paragraph::new(warning_text)
         .wrap(Wrap { trim: true })
@@ -374,7 +377,6 @@ mod tests {
   use super::*;
   use crate::core::pagination::Paged;
   use crate::core::plugin_api::TrackInfo;
-  use crate::core::source::Source;
   use ratatui::{backend::TestBackend, Terminal};
 
   fn rendered(app: &App, area: Rect) -> String {
@@ -462,5 +464,51 @@ mod tests {
         "{spotify_panel} panel should render under Spotify: {content}"
       );
     }
+  }
+
+  #[test]
+  fn an_empty_spotify_playlist_block_explains_the_api_gap() {
+    let app = App::default();
+    let content = rendered(&app, Rect::new(0, 0, 90, 30));
+    assert!(
+      content.contains("Cannot display Spotify created playlists"),
+      "{content}"
+    );
+  }
+
+  #[test]
+  fn tidal_results_show_every_block_without_the_spotify_hint() {
+    use crate::core::plugin_api::{AlbumInfo, ArtistInfo};
+    let mut app = App::default();
+    app.active_source = Source::Tidal;
+    app.set_search_results(crate::core::app::SearchResult {
+      artists: Some(Paged {
+        items: vec![ArtistInfo {
+          id: Some("7".into()),
+          uri: Some("tidal:artist:7".into()),
+          name: "The Offspring".into(),
+          image_url: None,
+        }],
+        total: 1,
+        ..Default::default()
+      }),
+      albums: Some(Paged {
+        items: vec![AlbumInfo {
+          uri: Some("tidal:album:5".into()),
+          name: "Smash".into(),
+          album_type: Some("album".into()),
+          ..Default::default()
+        }],
+        total: 1,
+        ..Default::default()
+      }),
+      ..Default::default()
+    });
+
+    let content = rendered(&app, Rect::new(0, 0, 90, 30));
+
+    assert!(content.contains("The Offspring"), "{content}");
+    assert!(content.contains("Smash"), "{content}");
+    assert!(!content.contains("Cannot display Spotify"), "{content}");
   }
 }

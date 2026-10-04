@@ -206,6 +206,7 @@ impl App {
           }
         }
         super::OpenTarget::SourcePlaylist(uri) => self.open_source_playlist_tracks(uri),
+        super::OpenTarget::SourceArtist { uri, name } => self.open_source_artist(uri, name),
         super::OpenTarget::PlaylistFolder(target_id) => {
           self.current_playlist_folder_id = target_id;
         }

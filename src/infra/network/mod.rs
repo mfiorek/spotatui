@@ -271,6 +271,10 @@ pub enum IoEvent {
   /// by `infra::tidal::dispatch`; an inert no-op without the `tidal` feature.
   #[cfg_attr(not(feature = "tidal"), allow(dead_code))]
   GetTidalSearchResults(String),
+  /// Open the artist page of a `tidal:artist:` URI: (uri, display name). Only
+  /// read by `infra::tidal::dispatch`; an inert no-op without the `tidal` feature.
+  #[cfg_attr(not(feature = "tidal"), allow(dead_code))]
+  GetTidalArtist(String, String),
   /// Make sure a Tidal login is in place: restore the saved one, else run the
   /// device login (handled by `infra::tidal::dispatch`).
   #[cfg_attr(not(feature = "tidal"), allow(dead_code))]
@@ -595,6 +599,7 @@ impl Network {
         | IoEvent::GetTidalPlaylists
         | IoEvent::GetTidalTracks(_)
         | IoEvent::GetTidalSearchResults(_)
+        | IoEvent::GetTidalArtist(..)
         | IoEvent::TidalLogin
         | IoEvent::GetRadioStations
         | IoEvent::GetRadioSearchResults(_)
@@ -1127,6 +1132,7 @@ impl Network {
       IoEvent::GetTidalPlaylists
       | IoEvent::GetTidalTracks(_)
       | IoEvent::GetTidalSearchResults(_)
+      | IoEvent::GetTidalArtist(..)
       | IoEvent::TidalLogin => {}
       // Radio browse/search events are handled by infra::radio::dispatch before
       // reaching the network; they only arrive here when the feature is off.

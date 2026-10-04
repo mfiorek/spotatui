@@ -8,8 +8,10 @@
 //!
 //! ## URIs
 //!
-//! Tracks: `tidal:track:<id>`. Sidebar rows (each opens the shared track table):
-//! `tidal:favorites:tracks`, `tidal:playlist:<uuid>`, `tidal:album:<id>`.
+//! Tracks: `tidal:track:<id>`. Listings (each opens the shared track table):
+//! `tidal:favorites:tracks`, `tidal:playlist:<uuid>`, `tidal:album:<id>` and
+//! `tidal:artist:<id>` (its top tracks). Search rows and the artist page
+//! carry the same album, playlist and artist URIs.
 
 pub mod auth;
 pub mod client;
@@ -30,7 +32,9 @@ use anyhow::{anyhow, Result};
 use reqwest::Client;
 use serde::de::{DeserializeOwned, IgnoredAny};
 
-use crate::core::plugin_api::{ArtistRef, PlaylistInfo, SearchResults, TrackInfo};
+use crate::core::plugin_api::{
+  AlbumInfo, ArtistInfo, ArtistRef, PlaylistInfo, SearchResults, TrackInfo,
+};
 use crate::core::source::{MediaSource, Searcher};
 use crate::infra::audio::LocalPlayer;
 use crate::infra::progressive::Completion;
@@ -104,6 +108,7 @@ pub use crate::infra::queue::ResumePoint;
 const TRACK_PREFIX: &str = "tidal:track:";
 const PLAYLIST_PREFIX: &str = "tidal:playlist:";
 const ALBUM_PREFIX: &str = "tidal:album:";
+const ARTIST_PREFIX: &str = "tidal:artist:";
 const FAVORITES_URI: &str = "tidal:favorites:tracks";
 
 /// Most v1 list endpoints cap a page at 100 items.
@@ -112,7 +117,13 @@ const PAGE_LIMIT: usize = 100;
 const PLAYLISTS_PAGE_LIMIT: usize = 50;
 /// The most items one listing loads, like Qobuz's cap.
 const MAX_ITEMS: usize = 10_000;
-const SEARCH_LIMIT: usize = 20;
+/// Per result type: artists, albums, playlists and tracks each get this many.
+const SEARCH_LIMIT: usize = 50;
+/// The search types, in the order the reply's pages are read.
+const SEARCH_TYPES: &str = "ARTISTS,ALBUMS,PLAYLISTS,TRACKS";
+/// An artist page shows this many top tracks, like Spotify's.
+const TOP_TRACKS_LIMIT: usize = 10;
+const SIMILAR_ARTISTS_LIMIT: usize = 20;
 
 /// Covers are served by uuid, with the dashes as path separators.
 const IMAGE_BASE: &str = "https://resources.tidal.com/images";
@@ -189,12 +200,22 @@ pub async fn finish_login(login: &DeviceLogin) -> Result<Arc<TidalClient>> {
 // Library and search
 // ---------------------------------------------------------------------------
 
-/// A sidebar row's listing, parsed from its URI.
+/// A listing's tracks, parsed from its URI.
 #[derive(Debug, PartialEq)]
 enum Listing {
   Favorites,
   Playlist(String),
   Album(String),
+  /// The artist's top tracks.
+  Artist(String),
+}
+
+/// What the artist page shows, already mapped to domain types.
+pub struct ArtistPage {
+  pub top_tracks: Vec<TrackInfo>,
+  /// Albums first, then EPs and singles.
+  pub albums: Vec<AlbumInfo>,
+  pub similar: Vec<ArtistInfo>,
 }
 
 /// The library and catalog of one login.
@@ -217,18 +238,24 @@ impl TidalSource {
   /// empty page, at the reported total, on a short page without a total, or
   /// at `max_items`.
   async fn fetch_list<T: DeserializeOwned>(&self, path: &str, per_page: usize) -> Result<Vec<T>> {
+    self.fetch_list_with(path, &[], per_page).await
+  }
+
+  /// [`Self::fetch_list`] with extra query parameters on every page.
+  async fn fetch_list_with<T: DeserializeOwned>(
+    &self,
+    path: &str,
+    extra: &[(&str, String)],
+    per_page: usize,
+  ) -> Result<Vec<T>> {
     let mut out: Vec<T> = Vec::new();
     loop {
-      let page: types::List<T> = self
-        .client
-        .get_json(
-          path,
-          &[
-            ("limit", per_page.to_string()),
-            ("offset", out.len().to_string()),
-          ],
-        )
-        .await?;
+      let mut params = vec![
+        ("limit", per_page.to_string()),
+        ("offset", out.len().to_string()),
+      ];
+      params.extend(extra.iter().cloned());
+      let page: types::List<T> = self.client.get_json(path, &params).await?;
       let got = page.items.len();
       let total = page.total_number_of_items;
       out.extend(page.items);
@@ -315,7 +342,71 @@ impl TidalSource {
             .collect(),
         )
       }
+      Listing::Artist(id) => Ok(
+        self
+          .artist_top_tracks(id)
+          .await?
+          .iter()
+          .map(|t| track_to_track_info(t, None))
+          .collect(),
+      ),
     }
+  }
+
+  async fn artist_top_tracks(&self, id: &str) -> Result<Vec<types::Track>> {
+    let page: types::List<types::Track> = self
+      .client
+      .get_json(
+        &format!("artists/{id}/toptracks"),
+        &[
+          ("limit", TOP_TRACKS_LIMIT.to_string()),
+          ("offset", "0".to_string()),
+        ],
+      )
+      .await?;
+    Ok(page.items)
+  }
+
+  /// The artist page of a `tidal:artist:<id>` URI: top tracks, the
+  /// discography (albums, then EPs and singles) and similar artists. Tidal
+  /// answers 404 for an artist with no similar artists, so a failed similar
+  /// call leaves that block empty instead of failing the page.
+  pub async fn artist_page(&self, artist_uri: &str) -> Result<ArtistPage> {
+    let id = artist_id_from_uri(artist_uri)?;
+    let albums_path = format!("artists/{id}/albums");
+    let singles = [("filter", "EPSANDSINGLES".to_string())];
+    let similar_path = format!("artists/{id}/similar");
+    let similar_params = [
+      ("limit", SIMILAR_ARTISTS_LIMIT.to_string()),
+      ("offset", "0".to_string()),
+    ];
+    let (top_tracks, albums, singles, similar) = tokio::join!(
+      self.artist_top_tracks(id),
+      self.fetch_list::<types::Album>(&albums_path, PAGE_LIMIT),
+      self.fetch_list_with::<types::Album>(&albums_path, &singles, PAGE_LIMIT),
+      self
+        .client
+        .get_json::<types::List<types::Artist>>(&similar_path, &similar_params),
+    );
+    let similar = match similar {
+      Ok(page) => page.items,
+      Err(e) => {
+        log::debug!("[tidal] similar artists of {id}: {e:#}");
+        Vec::new()
+      }
+    };
+    Ok(ArtistPage {
+      top_tracks: top_tracks?
+        .iter()
+        .map(|t| track_to_track_info(t, None))
+        .collect(),
+      albums: albums?
+        .iter()
+        .chain(singles?.iter())
+        .map(album_to_album_info)
+        .collect(),
+      similar: similar.iter().map(artist_to_artist_info).collect(),
+    })
   }
 }
 
@@ -363,27 +454,41 @@ impl MediaSource for TidalSource {
 }
 
 impl Searcher for TidalSource {
-  /// Tracks only: album and artist rows would route to Spotify-bound events.
+  /// One combined call for artists, albums, playlists and tracks. The rows
+  /// carry `tidal:` URIs, which the search screen routes to this source.
   async fn search(&self, query: &str) -> Result<SearchResults> {
-    let found: types::List<types::Track> = self
+    let found: types::SearchReply = self
       .client
       .get_json(
-        "search/tracks",
+        "search",
         &[
           ("query", query.to_string()),
+          ("types", SEARCH_TYPES.to_string()),
           ("limit", SEARCH_LIMIT.to_string()),
+          ("offset", "0".to_string()),
         ],
       )
       .await?;
     Ok(SearchResults {
       tracks: found
+        .tracks
         .items
         .iter()
         .map(|t| track_to_track_info(t, None))
         .collect(),
-      albums: vec![],
-      artists: vec![],
-      playlists: vec![],
+      albums: found.albums.items.iter().map(album_to_album_info).collect(),
+      artists: found
+        .artists
+        .items
+        .iter()
+        .map(artist_to_artist_info)
+        .collect(),
+      playlists: found
+        .playlists
+        .items
+        .iter()
+        .map(playlist_to_playlist_info)
+        .collect(),
       shows: vec![],
     })
   }
@@ -406,6 +511,14 @@ pub fn track_id_from_uri(uri: &str) -> Result<&str> {
     .ok_or_else(|| anyhow!("Not a tidal track URI: {uri}"))
 }
 
+/// The id of a `tidal:artist:<id>` URI.
+fn artist_id_from_uri(uri: &str) -> Result<&str> {
+  uri
+    .strip_prefix(ARTIST_PREFIX)
+    .filter(|id| is_path_safe(id))
+    .ok_or_else(|| anyhow!("Not a tidal artist URI: {uri}"))
+}
+
 fn listing_from_uri(uri: &str) -> Result<Listing> {
   let listing = if uri == FAVORITES_URI {
     Some(Listing::Favorites)
@@ -413,10 +526,18 @@ fn listing_from_uri(uri: &str) -> Result<Listing> {
     is_path_safe(uuid).then(|| Listing::Playlist(uuid.to_string()))
   } else if let Some(id) = uri.strip_prefix(ALBUM_PREFIX) {
     is_path_safe(id).then(|| Listing::Album(id.to_string()))
+  } else if let Some(id) = uri.strip_prefix(ARTIST_PREFIX) {
+    is_path_safe(id).then(|| Listing::Artist(id.to_string()))
   } else {
     None
   };
   listing.ok_or_else(|| anyhow!("Not a tidal playlist URI: {uri}"))
+}
+
+/// Whether `uri` names a list of tracks (favorites, a playlist, an album or
+/// an artist's top tracks) rather than one track.
+pub fn is_listing_uri(uri: &str) -> bool {
+  listing_from_uri(uri).is_ok()
 }
 
 /// The CDN URL of a cover uuid, or `None` for a missing or empty one.
@@ -476,6 +597,45 @@ fn album_to_playlist_info(a: &types::Album) -> PlaylistInfo {
     collaborative: false,
     public: Some(true),
     image_url: image_url(a.cover.as_deref()),
+  }
+}
+
+/// A catalog album as a search or discography row; [`album_to_playlist_info`]
+/// is the sidebar's shape of the same album.
+fn album_to_album_info(a: &types::Album) -> AlbumInfo {
+  let mut artists: Vec<ArtistRef> = a
+    .artists
+    .iter()
+    .filter(|artist| !artist.name.is_empty())
+    .map(artist_ref)
+    .collect();
+  if artists.is_empty() {
+    artists.extend(
+      a.artist
+        .iter()
+        .filter(|artist| !artist.name.is_empty())
+        .map(artist_ref),
+    );
+  }
+  AlbumInfo {
+    id: Some(a.id.clone()).filter(|id| !id.is_empty()),
+    uri: (!a.id.is_empty()).then(|| format!("{ALBUM_PREFIX}{}", a.id)),
+    name: a.title.clone(),
+    artists,
+    album_type: a.kind.as_deref().map(str::to_lowercase),
+    release_date: a.release_date.clone().filter(|d| !d.is_empty()),
+    total_tracks: Some(a.number_of_tracks),
+    image_url: image_url(a.cover.as_deref()),
+    tracks: Vec::new(),
+  }
+}
+
+fn artist_to_artist_info(a: &types::Artist) -> ArtistInfo {
+  ArtistInfo {
+    id: Some(a.id.clone()).filter(|id| !id.is_empty()),
+    uri: (!a.id.is_empty()).then(|| format!("{ARTIST_PREFIX}{}", a.id)),
+    name: a.name.clone(),
+    image_url: image_url(a.picture.as_deref()),
   }
 }
 
@@ -564,11 +724,40 @@ pub(crate) mod test_server {
   /// handle yielding each request as its request line, headers (names
   /// lowercased) and body.
   pub async fn serve(replies: Vec<Reply>) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+    serve_with(replies.len(), move |index, _| replies[index].clone()).await
+  }
+
+  /// Serve `count` connections, answering each with the first route whose
+  /// path prefix (after `/v1/`) its request line names, else a 404. For calls
+  /// made concurrently, whose arrival order is not fixed.
+  pub async fn serve_routes(
+    routes: Vec<(&'static str, Reply)>,
+    count: usize,
+  ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+    serve_with(count, move |_, request| {
+      let path = request
+        .split_whitespace()
+        .nth(1)
+        .and_then(|target| target.strip_prefix("/v1/"))
+        .unwrap_or("");
+      routes
+        .iter()
+        .find(|(prefix, _)| path.starts_with(prefix))
+        .map(|(_, reply)| reply.clone())
+        .unwrap_or_else(|| Reply::new("404 Not Found", "{}"))
+    })
+    .await
+  }
+
+  async fn serve_with(
+    count: usize,
+    reply_for: impl Fn(usize, &str) -> Reply + Send + 'static,
+  ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let handle = tokio::spawn(async move {
       let mut requests = Vec::new();
-      for reply in replies {
+      for index in 0..count {
         let Ok((mut stream, _)) = listener.accept().await else {
           break;
         };
@@ -604,6 +793,7 @@ pub(crate) mod test_server {
           let _ = reader.read_exact(&mut body).await;
         }
         request.push_str(&String::from_utf8_lossy(&body));
+        let reply = reply_for(index, &request);
         requests.push(request);
         let extra: String = reply.headers.iter().map(|h| format!("{h}\r\n")).collect();
         let response = format!(
@@ -771,7 +961,7 @@ pub(crate) mod test_server {
 mod tests {
   use base64::Engine as _;
 
-  use super::test_server::{serve, source_at, Reply};
+  use super::test_server::{serve, serve_routes, source_at, Reply};
   use super::*;
 
   fn track(json: &str) -> types::Track {
@@ -806,6 +996,10 @@ mod tests {
       listing_from_uri("tidal:album:77646169").unwrap(),
       Listing::Album("77646169".into())
     );
+    assert_eq!(
+      listing_from_uri("tidal:artist:4211").unwrap(),
+      Listing::Artist("4211".into())
+    );
   }
 
   #[test]
@@ -816,8 +1010,11 @@ mod tests {
       "tidal:album:",
       "tidal:playlist:../sessions",
       "tidal:album:1?limit=1",
+      "tidal:artist:",
+      "tidal:artist:7/similar",
     ] {
       assert!(listing_from_uri(uri).is_err(), "{uri}");
+      assert!(!is_listing_uri(uri), "{uri}");
     }
   }
 
@@ -995,17 +1192,173 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn search_asks_for_tracks_only() {
-    let (base, server) = serve(vec![page(&[1], 1)]).await;
-    let results = source_at(&base).search("daft punk").await.unwrap();
-    assert_eq!(results.tracks.len(), 1);
-    assert!(results.albums.is_empty());
+  async fn search_asks_for_every_type_in_one_call() {
+    let (base, server) = serve(vec![Reply::new(
+      "200 OK",
+      r#"{"artists":{"items":[{"id":7,"name":"The Offspring","picture":"aa-bb"}],"totalNumberOfItems":1},
+          "albums":{"items":[{"id":5,"title":"Smash","type":"ALBUM","releaseDate":"1994-04-08",
+                              "numberOfTracks":14,"artists":[{"id":7,"name":"The Offspring"}]}]},
+          "playlists":{"items":[{"uuid":"u-1","title":"Punk","creator":{"id":0}}]},
+          "tracks":{"items":[{"id":11,"title":"Self Esteem"}]},
+          "videos":{"items":[{"id":99}]},
+          "topHit":{"type":"ARTISTS","value":{"id":7}}}"#,
+    )])
+    .await;
+    let results = source_at(&base).search("the offspring").await.unwrap();
+    assert_eq!(results.tracks[0].uri.as_deref(), Some("tidal:track:11"));
+    assert_eq!(results.artists[0].uri.as_deref(), Some("tidal:artist:7"));
+    assert_eq!(results.albums[0].uri.as_deref(), Some("tidal:album:5"));
+    assert_eq!(results.playlists[0].uri, "tidal:playlist:u-1");
     let requests = server.await.unwrap();
     assert!(
-      requests[0].starts_with("GET /v1/search/tracks?query=daft+punk&limit=20"),
+      requests[0].starts_with(
+        "GET /v1/search?query=the+offspring&types=ARTISTS%2CALBUMS%2CPLAYLISTS%2CTRACKS&limit=50&offset=0"
+      ),
       "{}",
       requests[0]
     );
+  }
+
+  #[tokio::test]
+  async fn a_search_reply_missing_a_type_leaves_that_block_empty() {
+    let (base, _server) = serve(vec![Reply::new(
+      "200 OK",
+      r#"{"tracks":{"items":[{"id":11,"title":"Self Esteem"}]}}"#,
+    )])
+    .await;
+    let results = source_at(&base).search("x").await.unwrap();
+    assert_eq!(results.tracks.len(), 1);
+    assert!(results.artists.is_empty() && results.albums.is_empty());
+    assert!(results.playlists.is_empty());
+  }
+
+  #[test]
+  fn a_search_album_lists_its_artists_kind_and_year() {
+    let a: types::Album = serde_json::from_str(
+      r#"{"id":5,"title":"Smash","type":"EP","releaseDate":"1994-04-08","numberOfTracks":14,
+          "cover":"cc-dd","artist":{"id":7,"name":"Main"},
+          "artists":[{"id":7,"name":"Main"},{"id":8,"name":"Guest"}]}"#,
+    )
+    .unwrap();
+    let info = album_to_album_info(&a);
+    assert_eq!(info.id.as_deref(), Some("5"));
+    assert_eq!(info.name, "Smash");
+    assert_eq!(info.album_type.as_deref(), Some("ep"));
+    assert_eq!(info.release_date.as_deref(), Some("1994-04-08"));
+    assert_eq!(info.total_tracks, Some(14));
+    let names: Vec<&str> = info.artists.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(names, ["Main", "Guest"]);
+    assert!(info.image_url.is_some());
+
+    let main_only: types::Album =
+      serde_json::from_str(r#"{"id":6,"title":"B","artist":{"id":7,"name":"Main"}}"#).unwrap();
+    assert_eq!(album_to_album_info(&main_only).artists[0].name, "Main");
+  }
+
+  #[test]
+  fn a_row_without_an_id_has_no_uri() {
+    let artist: types::Artist = serde_json::from_str(r#"{"name":"Nobody"}"#).unwrap();
+    assert_eq!(artist_to_artist_info(&artist).uri, None);
+    let album: types::Album = serde_json::from_str(r#"{"title":"Nothing"}"#).unwrap();
+    assert_eq!(album_to_album_info(&album).uri, None);
+  }
+
+  #[tokio::test]
+  async fn an_artist_page_reads_top_tracks_the_discography_and_similar_artists() {
+    let (base, server) = serve_routes(
+      vec![
+        (
+          "artists/7/toptracks",
+          Reply::new("200 OK", r#"{"items":[{"id":11,"title":"Self Esteem"}]}"#),
+        ),
+        (
+          "artists/7/albums?limit=100&offset=0&filter=EPSANDSINGLES",
+          Reply::new(
+            "200 OK",
+            r#"{"items":[{"id":6,"title":"Single","type":"SINGLE"}],"totalNumberOfItems":1}"#,
+          ),
+        ),
+        (
+          "artists/7/albums",
+          Reply::new(
+            "200 OK",
+            r#"{"items":[{"id":5,"title":"Smash","type":"ALBUM"}],"totalNumberOfItems":1}"#,
+          ),
+        ),
+        (
+          "artists/7/similar",
+          Reply::new("200 OK", r#"{"items":[{"id":8,"name":"Bad Religion"}]}"#),
+        ),
+      ],
+      4,
+    )
+    .await;
+    let page = source_at(&base)
+      .artist_page("tidal:artist:7")
+      .await
+      .unwrap();
+    assert_eq!(page.top_tracks[0].uri.as_deref(), Some("tidal:track:11"));
+    let albums: Vec<&str> = page.albums.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(
+      albums,
+      ["Smash", "Single"],
+      "albums first, then EPs and singles"
+    );
+    assert_eq!(page.similar[0].uri.as_deref(), Some("tidal:artist:8"));
+    let requests = server.await.unwrap();
+    assert!(
+      requests
+        .iter()
+        .any(|r| r.starts_with("GET /v1/artists/7/toptracks?limit=10&offset=0")),
+      "{requests:?}"
+    );
+  }
+
+  #[tokio::test]
+  async fn an_artist_without_similar_artists_still_opens() {
+    let (base, _server) = serve_routes(
+      vec![
+        (
+          "artists/7/toptracks",
+          Reply::new("200 OK", r#"{"items":[{"id":11,"title":"Self Esteem"}]}"#),
+        ),
+        ("artists/7/albums", Reply::new("200 OK", r#"{"items":[]}"#)),
+      ],
+      4,
+    )
+    .await;
+    let page = source_at(&base)
+      .artist_page("tidal:artist:7")
+      .await
+      .unwrap();
+    assert_eq!(page.top_tracks.len(), 1);
+    assert!(page.similar.is_empty());
+  }
+
+  #[tokio::test]
+  async fn an_artist_page_fails_when_its_top_tracks_fail() {
+    let (base, _server) = serve_routes(
+      vec![("artists/7/albums", Reply::new("200 OK", r#"{"items":[]}"#))],
+      4,
+    )
+    .await;
+    assert!(source_at(&base)
+      .artist_page("tidal:artist:7")
+      .await
+      .is_err());
+  }
+
+  #[tokio::test]
+  async fn an_artist_uri_lists_its_top_tracks() {
+    let (base, server) = serve(vec![Reply::new(
+      "200 OK",
+      r#"{"items":[{"id":11,"title":"Self Esteem"},{"id":12,"title":"Gone Away"}]}"#,
+    )])
+    .await;
+    let tracks = source_at(&base).tracks("tidal:artist:7").await.unwrap();
+    assert_eq!(tracks.len(), 2);
+    let requests = server.await.unwrap();
+    assert!(requests[0].starts_with("GET /v1/artists/7/toptracks?limit=10&offset=0"));
   }
 
   #[tokio::test]
@@ -1075,6 +1428,25 @@ mod tests {
     let results = source.search("Daft Punk").await.expect("search");
     let hit = results.tracks.first().expect("a search hit");
     println!("search: {} - {}", hit.name, hit.artists.join(", "));
+    println!(
+      "search: {} artists, {} albums, {} playlists",
+      results.artists.len(),
+      results.albums.len(),
+      results.playlists.len()
+    );
+    let artist = results.artists.first().expect("an artist hit");
+    let page = source
+      .artist_page(artist.uri.as_deref().expect("an artist URI"))
+      .await
+      .expect("artist page");
+    println!(
+      "{}: {} top tracks, {} releases, {} similar",
+      artist.name,
+      page.top_tracks.len(),
+      page.albums.len(),
+      page.similar.len()
+    );
+    assert!(!page.top_tracks.is_empty() && !page.albums.is_empty());
   }
 
   /// Opens a hi-res track and one without a hi-res master through the

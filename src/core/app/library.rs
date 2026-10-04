@@ -749,6 +749,52 @@ impl App {
     ));
   }
 
+  /// Open a decoded source's artist page, routed by URI scheme
+  /// (`tidal:artist:`); an unknown scheme is a no-op. The page opens when the
+  /// data lands, as Spotify's does.
+  pub(crate) fn open_source_artist(&mut self, uri: String, name: String) {
+    if uri.starts_with("tidal:artist:") {
+      self.dispatch(IoEvent::GetTidalArtist(uri, name));
+    }
+  }
+
+  /// Show a decoded source's artist page. Its rows carry the source's URIs,
+  /// which the artist page's Enter routes back to that source.
+  #[cfg_attr(not(feature = "tidal"), allow(dead_code))]
+  pub(crate) fn show_source_artist(
+    &mut self,
+    artist_id: String,
+    artist_name: String,
+    top_tracks: Vec<crate::core::plugin_api::TrackInfo>,
+    albums: Vec<crate::core::plugin_api::AlbumInfo>,
+    related_artists: Vec<crate::core::plugin_api::ArtistInfo>,
+  ) {
+    let first_block = if top_tracks.is_empty() {
+      ArtistBlock::Albums
+    } else {
+      ArtistBlock::TopTracks
+    };
+    let total = albums.len() as u32;
+    self.artist = Some(Artist {
+      artist_id,
+      artist_name,
+      albums: crate::core::pagination::Paged {
+        items: albums,
+        total,
+        ..Default::default()
+      },
+      related_artists,
+      top_tracks,
+      selected_album_index: 0,
+      selected_related_artist_index: 0,
+      selected_top_track_index: 0,
+      artist_hovered_block: first_block.clone(),
+      artist_selected_block: first_block,
+    });
+    self.bump_display(DisplayDomain::Artist);
+    self.push_navigation_stack(RouteId::Artist, ActiveBlock::ArtistBlock);
+  }
+
   pub fn get_user_country(&self) -> Option<Country> {
     // `country` is stored as its ISO 3166-1 alpha-2 string (the multi-source
     // domain holds no rspotify types); re-derive the rspotify `Country` here at
@@ -765,6 +811,51 @@ impl App {
 mod tests {
   use super::*;
   use crate::core::app::test_support::*;
+
+  #[test]
+  fn a_source_artist_page_opens_on_its_top_tracks() {
+    let mut app = App::default();
+    let track = TrackInfo {
+      uri: Some("tidal:track:11".to_string()),
+      ..TrackInfo::from(&full_track("0000000000000000000001", "Self Esteem"))
+    };
+    let album = crate::core::plugin_api::AlbumInfo {
+      uri: Some("tidal:album:5".to_string()),
+      name: "Smash".to_string(),
+      ..Default::default()
+    };
+
+    app.show_source_artist(
+      "4211".to_string(),
+      "The Offspring".to_string(),
+      vec![track],
+      vec![album],
+      vec![],
+    );
+
+    let artist = app.artist.as_ref().expect("an artist page");
+    assert_eq!(artist.artist_name, "The Offspring");
+    assert_eq!(artist.albums.total, 1);
+    assert_eq!(artist.artist_selected_block, ArtistBlock::TopTracks);
+    assert_eq!(app.get_current_route().id, RouteId::Artist);
+  }
+
+  #[test]
+  fn a_source_artist_page_without_top_tracks_opens_on_its_albums() {
+    let mut app = App::default();
+
+    app.show_source_artist(
+      "4211".to_string(),
+      "The Offspring".to_string(),
+      vec![],
+      vec![],
+      vec![],
+    );
+
+    let artist = app.artist.as_ref().expect("an artist page");
+    assert_eq!(artist.artist_hovered_block, ArtistBlock::Albums);
+    assert_eq!(artist.artist_selected_block, ArtistBlock::Albums);
+  }
 
   #[test]
   fn default_sort_recently_played_seeds_state_and_sorts_items() {

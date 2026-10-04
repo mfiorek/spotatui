@@ -1,4 +1,5 @@
 use crate::core::app::{ActiveBlock, App, RouteId};
+use crate::core::queue::{queue_item_source, source_label, QueueItemSource};
 use crate::core::user_config::KeyBindings;
 use crate::tui::event::Key;
 
@@ -46,6 +47,21 @@ pub fn uri_playback_request(
     }
   }
   (kept, offset)
+}
+
+/// The URI of a row a decoded source owns (`tidal:album:…`); `None` for a
+/// Spotify row or one without a URI.
+pub fn source_row_uri(uri: Option<&str>) -> Option<String> {
+  uri
+    .filter(|uri| queue_item_source(uri) != QueueItemSource::Spotify)
+    .map(str::to_string)
+}
+
+/// Saving, following, deleting and recommending are Spotify library calls:
+/// on a decoded source's row they say so instead of sending its id to Spotify.
+pub fn refuse_spotify_only_key(app: &mut App, uri: &str) {
+  let source = source_label(queue_item_source(uri));
+  app.set_status_message(format!("Not available for {source} results"), 4);
 }
 
 pub fn on_down_press_handler<T>(selection_data: &[T], selection_index: Option<usize>) -> usize {

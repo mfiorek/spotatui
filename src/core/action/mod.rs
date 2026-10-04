@@ -506,9 +506,13 @@ pub enum OpenTarget {
   /// the producer uses (search results vs the user's playlists), matching
   /// what each opening path has always passed.
   Playlist { id: String, from_search: bool },
-  /// A decoded source's playlist or folder, routed by URI scheme (`file:`,
-  /// `subsonic:`, `youtube:playlist:`, `qobuz:`); an unknown scheme is a no-op.
+  /// A decoded source's playlist, folder or album, routed by URI scheme
+  /// (`file:`, `subsonic:`, `youtube:playlist:`, `qobuz:`, `tidal:`); an
+  /// unknown scheme is a no-op.
   SourcePlaylist(String),
+  /// A decoded source's artist page, routed by URI scheme (`tidal:artist:`);
+  /// an unknown scheme is a no-op. The name seeds the page header.
+  SourceArtist { uri: String, name: String },
   /// Scope the playlist sidebar to a rootlist folder id (session-local, not
   /// to be persisted).
   PlaylistFolder(usize),
