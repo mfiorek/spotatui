@@ -121,8 +121,6 @@ const MAX_ITEMS: usize = 10_000;
 const SEARCH_LIMIT: usize = 50;
 /// The search types, in the order the reply's pages are read.
 const SEARCH_TYPES: &str = "ARTISTS,ALBUMS,PLAYLISTS,TRACKS";
-/// An artist page shows this many top tracks, like Spotify's.
-const TOP_TRACKS_LIMIT: usize = 10;
 const SIMILAR_ARTISTS_LIMIT: usize = 20;
 
 /// Covers are served by uuid, with the dashes as path separators.
@@ -353,18 +351,12 @@ impl TidalSource {
     }
   }
 
+  /// Every top track, most popular first. Unlike Spotify's fixed ten,
+  /// Tidal pages the whole ranking.
   async fn artist_top_tracks(&self, id: &str) -> Result<Vec<types::Track>> {
-    let page: types::List<types::Track> = self
-      .client
-      .get_json(
-        &format!("artists/{id}/toptracks"),
-        &[
-          ("limit", TOP_TRACKS_LIMIT.to_string()),
-          ("offset", "0".to_string()),
-        ],
-      )
-      .await?;
-    Ok(page.items)
+    self
+      .fetch_list(&format!("artists/{id}/toptracks"), PAGE_LIMIT)
+      .await
   }
 
   /// The artist page of a `tidal:artist:<id>` URI: top tracks, the
@@ -1309,7 +1301,7 @@ mod tests {
     assert!(
       requests
         .iter()
-        .any(|r| r.starts_with("GET /v1/artists/7/toptracks?limit=10&offset=0")),
+        .any(|r| r.starts_with("GET /v1/artists/7/toptracks?limit=100&offset=0")),
       "{requests:?}"
     );
   }
@@ -1358,7 +1350,33 @@ mod tests {
     let tracks = source_at(&base).tracks("tidal:artist:7").await.unwrap();
     assert_eq!(tracks.len(), 2);
     let requests = server.await.unwrap();
-    assert!(requests[0].starts_with("GET /v1/artists/7/toptracks?limit=10&offset=0"));
+    assert!(requests[0].starts_with("GET /v1/artists/7/toptracks?limit=100&offset=0"));
+  }
+
+  #[tokio::test]
+  async fn an_artist_page_pages_through_every_top_track() {
+    let (base, server) = serve_routes(
+      vec![
+        ("artists/7/toptracks?limit=100&offset=0", page(&[11], 2)),
+        ("artists/7/toptracks?limit=100&offset=1", page(&[12], 2)),
+        ("artists/7/albums", Reply::new("200 OK", r#"{"items":[]}"#)),
+      ],
+      5,
+    )
+    .await;
+    let page = source_at(&base)
+      .artist_page("tidal:artist:7")
+      .await
+      .unwrap();
+    let uris: Vec<_> = page.top_tracks.iter().map(|t| t.uri.as_deref()).collect();
+    assert_eq!(uris, [Some("tidal:track:11"), Some("tidal:track:12")]);
+    let requests = server.await.unwrap();
+    assert!(
+      requests
+        .iter()
+        .any(|r| r.contains("toptracks?limit=100&offset=1")),
+      "{requests:?}"
+    );
   }
 
   #[tokio::test]
